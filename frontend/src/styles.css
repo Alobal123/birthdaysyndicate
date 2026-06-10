@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #122023;
+  background: #edf3f1;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Space Grotesk", sans-serif;
+  background:
+    radial-gradient(900px 450px at 10% -10%, rgba(39, 213, 167, 0.28), transparent 65%),
+    radial-gradient(760px 420px at 100% 0%, rgba(240, 93, 35, 0.26), transparent 62%),
+    linear-gradient(160deg, #f2f7f5 0%, #e8f0ee 55%, #dce8e4 100%);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.panel {
+  @apply rounded-2xl bg-white/80 backdrop-blur border border-white/40 shadow-card;
+}
+
+.btn-primary {
+  @apply inline-flex items-center justify-center rounded-xl bg-ink px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90;
+}
+
+.btn-accent {
+  @apply inline-flex items-center justify-center rounded-xl bg-ember px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90;
+}
+
+.btn-ghost {
+  @apply inline-flex items-center justify-center rounded-xl bg-white px-4 py-2 text-sm font-semibold text-ink border border-ink/15 transition hover:bg-fog;
+}
+
+input,
+select {
+  @apply rounded-lg border border-ink/20 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-mint/40;
+}

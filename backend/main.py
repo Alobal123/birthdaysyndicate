@@ -26,6 +26,11 @@ app.include_router(loot.router)
 app.include_router(admin.router)
 
 
+@app.get("/")
+def root():
+    return {"service": "birthday-syndicate-api", "ok": True, "health": "/health"}
+
+
 @app.get("/health")
 def health():
     return {"ok": True}

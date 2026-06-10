@@ -10,26 +10,45 @@ export default function EncounterScanPage() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const parseEncounterId = (text) => {
+    const raw = (text || "").trim();
+    const uuidRegex = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+    // Accept direct UUID payloads.
+    if (uuidRegex.test(raw)) {
+      return raw.match(uuidRegex)?.[0] || "";
+    }
+
+    // Accept full links like https://.../encounter/<uuid>.
+    const pathMatch = raw.match(/\/encounter\/([0-9a-f-]{36})/i);
+    if (pathMatch?.[1]) {
+      return pathMatch[1];
+    }
+
+    return "";
+  };
+
   const handleScan = useCallback(
     async (text) => {
       if (!session || busy) {
-        return;
+        return false;
       }
 
-      const match = text.match(/\/encounter\/([0-9a-f-]{36})/i);
-      if (!match?.[1]) {
+      const encounterId = parseEncounterId(text);
+      if (!encounterId) {
         setError("Invalid encounter QR");
-        return;
+        return false;
       }
 
       setBusy(true);
       setError("");
       try {
-        const encounterId = match[1];
         await joinEncounter(encounterId, session.id);
         navigate(`/encounter/${encounterId}/strategy`);
+        return true;
       } catch (err) {
         setError(err.message || "Could not join encounter");
+        return false;
       } finally {
         setBusy(false);
       }

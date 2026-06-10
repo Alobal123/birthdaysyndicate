@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { joinEncounter } from "../lib/api";
 import { loadPlayerSession } from "../lib/session";
@@ -26,6 +26,15 @@ export default function EncounterLinkJoinPage() {
     }
   };
 
+  useEffect(() => {
+    if (!session?.id || !id || busy) {
+      return;
+    }
+    onJoin();
+    // Intentionally trigger when link id/session become available.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, session?.id]);
+
   return (
     <main className="mx-auto max-w-xl p-6">
       <section className="panel p-6 animate-riseIn">
@@ -35,8 +44,10 @@ export default function EncounterLinkJoinPage() {
         {!session ? <p className="mt-4 text-sm text-ember">Sign in first to join this encounter.</p> : null}
         {error ? <p className="mt-4 text-sm text-ember">{error}</p> : null}
 
+        {session ? <p className="mt-4 text-sm text-steel">Joining encounter...</p> : null}
+
         <button className="btn-primary mt-6" onClick={onJoin} disabled={!session || busy}>
-          {busy ? "Joining..." : "Join Encounter"}
+          {busy ? "Joining..." : "Join Encounter Manually"}
         </button>
         <div className="mt-3">
           <button className="btn-ghost" onClick={() => navigate("/dashboard")}>Back To Dashboard</button>

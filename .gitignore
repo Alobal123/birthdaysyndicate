@@ -47,7 +47,7 @@ frontend/dist/
 frontend/.vite/
 
 # Build / temp
-build/
+frontend/fbuild/
 dist/
 .tmp/
 tmp/

@@ -1,7 +1,6 @@
 import { useCallback, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import QRScanner from "../components/QRScanner";
-import { joinEncounter } from "../lib/api";
 import { loadPlayerSession } from "../lib/session";
 
 export default function EncounterScanPage() {
@@ -42,16 +41,8 @@ export default function EncounterScanPage() {
 
       setBusy(true);
       setError("");
-      try {
-        await joinEncounter(encounterId, session.id);
-        navigate(`/encounter/${encounterId}/strategy`);
-        return true;
-      } catch (err) {
-        setError(err.message || "Could not join encounter");
-        return false;
-      } finally {
-        setBusy(false);
-      }
+      navigate(`/encounter/${encounterId}`);
+      return true;
     },
     [busy, navigate, session]
   );

@@ -53,6 +53,9 @@ def join_encounter(encounter_id: str, body: JoinEncounterBody):
     if not encounter:
         raise HTTPException(status_code=404, detail="Encounter not found")
     if encounter["status"] != EncounterStatus.PENDING.value:
+        # Idempotent join: if this player already joined, return success.
+        if encounter.get("p2_id") == body.player_id:
+            return encounter
         raise HTTPException(status_code=409, detail="Encounter is not joinable")
     if encounter["p1_id"] == body.player_id:
         raise HTTPException(status_code=400, detail="Cannot join your own encounter as player 2")
@@ -67,6 +70,17 @@ def join_encounter(encounter_id: str, body: JoinEncounterBody):
         .execute()
     )
     if not update_res.data:
+        # Handle race: another request may have already locked this encounter.
+        latest = (
+            client.table("encounters")
+            .select("id, p1_id, p2_id, status")
+            .eq("id", encounter_id)
+            .maybe_single()
+            .execute()
+            .data
+        )
+        if latest and latest.get("p2_id") == body.player_id:
+            return latest
         raise HTTPException(status_code=409, detail="Encounter already joined")
     return update_res.data[0]
 

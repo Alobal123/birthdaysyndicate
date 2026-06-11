@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import QRDisplay from "../components/QRDisplay";
-import { createEncounter } from "../lib/api";
+import { createEncounter, getEncounter } from "../lib/api";
 import { loadPlayerSession } from "../lib/session";
 import { supabase } from "../lib/supabase";
 
@@ -33,6 +33,26 @@ export default function EncounterHostPage() {
       return;
     }
 
+    let canceled = false;
+
+    const checkStatus = async () => {
+      try {
+        const latest = await getEncounter(encounter.id);
+        if (canceled) {
+          return;
+        }
+        setEncounter((prev) => ({ ...(prev || {}), ...latest }));
+        if (latest.status === "LOCKED") {
+          navigate(`/encounter/${latest.id}/strategy`);
+        }
+      } catch {
+        // Keep UI responsive if a polling call fails.
+      }
+    };
+
+    const timerId = window.setInterval(checkStatus, 1800);
+    checkStatus();
+
     const channel = supabase
       .channel(`encounter-${encounter.id}`)
       .on(
@@ -49,6 +69,8 @@ export default function EncounterHostPage() {
       .subscribe();
 
     return () => {
+      canceled = true;
+      window.clearInterval(timerId);
       supabase.removeChannel(channel);
     };
   }, [encounter?.id, navigate]);

@@ -38,6 +38,21 @@ def create_encounter(body: CreateEncounterBody):
     return result.data[0]
 
 
+@router.get("/encounters/{encounter_id}")
+def get_encounter(encounter_id: str):
+    client = get_supabase()
+    result = (
+        client.table("encounters")
+        .select("*")
+        .eq("id", encounter_id)
+        .maybe_single()
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Encounter not found")
+    return result.data
+
+
 @router.patch("/encounters/{encounter_id}/join")
 def join_encounter(encounter_id: str, body: JoinEncounterBody):
     client = get_supabase()
@@ -103,8 +118,12 @@ def submit_choice(encounter_id: str, body: SubmitChoiceBody):
         raise HTTPException(status_code=409, detail="Encounter cannot accept choices")
 
     if body.player_id == encounter["p1_id"]:
+        if encounter.get("p1_choice"):
+            raise HTTPException(status_code=409, detail="Choice already locked")
         choice_patch = {"p1_choice": body.choice.value, "p1_item": body.item}
     elif body.player_id == encounter["p2_id"]:
+        if encounter.get("p2_choice"):
+            raise HTTPException(status_code=409, detail="Choice already locked")
         choice_patch = {"p2_choice": body.choice.value, "p2_item": body.item}
     else:
         raise HTTPException(status_code=403, detail="Player is not part of this encounter")

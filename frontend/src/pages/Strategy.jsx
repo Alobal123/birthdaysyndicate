@@ -15,6 +15,7 @@ export default function StrategyPage() {
   const [inventory, setInventory] = useState([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
 
   useEffect(() => {
     if (!session?.id) {
@@ -53,7 +54,7 @@ export default function StrategyPage() {
   const itemOptions = useMemo(() => ["", ...inventory], [inventory]);
 
   const onSubmit = async () => {
-    if (!session?.id || !id) {
+    if (!session?.id || !id || submitted) {
       return;
     }
 
@@ -61,6 +62,7 @@ export default function StrategyPage() {
     setError("");
     try {
       const result = await submitChoice(id, session.id, selection, item || null);
+      setSubmitted(true);
       if (result.status === "COMPLETED" || result.status === "CANCELED") {
         navigate(`/encounter/${id}/reveal`, { state: result });
       }
@@ -85,6 +87,7 @@ export default function StrategyPage() {
                 selection === choice ? "border-ink bg-ink text-white" : "border-ink/15 bg-white text-ink hover:bg-fog"
               }`}
               onClick={() => setSelection(choice)}
+              disabled={busy || submitted}
             >
               {choice}
             </button>
@@ -93,7 +96,7 @@ export default function StrategyPage() {
 
         <div className="mt-5">
           <label className="text-sm font-semibold text-ink">Item (optional)</label>
-          <select value={item} onChange={(e) => setItem(e.target.value)} className="mt-2 w-full">
+          <select value={item} onChange={(e) => setItem(e.target.value)} className="mt-2 w-full" disabled={busy || submitted}>
             {itemOptions.map((opt, idx) => (
               <option key={`${opt}-${idx}`} value={opt}>
                 {opt || "No item"}
@@ -103,10 +106,11 @@ export default function StrategyPage() {
         </div>
 
         {error ? <p className="mt-3 text-sm text-ember">{error}</p> : null}
+        {submitted ? <p className="mt-3 text-sm text-steel">Choice locked. Waiting for the other player...</p> : null}
 
         <div className="mt-6 flex flex-wrap gap-2">
-          <button className="btn-accent" onClick={onSubmit} disabled={busy}>
-            {busy ? "Submitting..." : "Lock Choice"}
+          <button className="btn-accent" onClick={onSubmit} disabled={busy || submitted}>
+            {busy ? "Submitting..." : submitted ? "Choice Locked" : "Lock Choice"}
           </button>
           <button className="btn-ghost" onClick={() => navigate("/dashboard")}>Cancel And Return</button>
         </div>

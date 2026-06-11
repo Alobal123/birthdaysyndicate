@@ -38,6 +38,10 @@ export function createEncounter(p1_id) {
   });
 }
 
+export function getEncounter(encounterId) {
+  return request(`/api/encounters/${encounterId}`);
+}
+
 export function joinEncounter(encounterId, player_id) {
   return request(`/api/encounters/${encounterId}/join`, {
     method: "PATCH",

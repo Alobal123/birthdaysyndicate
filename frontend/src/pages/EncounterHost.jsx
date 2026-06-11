@@ -57,7 +57,7 @@ export default function EncounterHostPage() {
     if (!encounter?.id) {
       return "";
     }
-    return `${window.location.origin}/encounter/${encounter.id}`;
+    return `${window.location.origin}/#/encounter/${encounter.id}`;
   }, [encounter?.id]);
 
   return (

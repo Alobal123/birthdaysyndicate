@@ -1,7 +1,7 @@
 import { Html5Qrcode } from "html5-qrcode";
 import { useEffect, useId } from "react";
 
-export default function QRScanner({ onScan }) {
+export default function QRScanner({ onScan, onError }) {
   const scannerId = useId().replace(/:/g, "");
 
   useEffect(() => {
@@ -22,7 +22,12 @@ export default function QRScanner({ onScan }) {
         },
         () => {}
       )
-      .catch(() => {});
+      .catch((err) => {
+        const message = err?.message || "Could not start camera scanner.";
+        if (onError) {
+          onError(message);
+        }
+      });
 
     return () => {
       stopped = true;

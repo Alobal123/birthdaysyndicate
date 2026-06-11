@@ -41,7 +41,11 @@ export default function EncounterScanPage() {
 
       setBusy(true);
       setError("");
-      navigate(`/encounter/${encounterId}`);
+
+      const targetPath = `/encounter/${encounterId}`;
+      // Prefer router navigation, then force hash navigation as a mobile-safe fallback.
+      navigate(targetPath);
+      window.location.hash = `#${targetPath}`;
       return true;
     },
     [busy, navigate, session]

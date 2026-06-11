@@ -6,6 +6,7 @@ export default function QRScanner({ onScan, onError }) {
 
   useEffect(() => {
     let stopped = false;
+    let handling = false;
     const scanner = new Html5Qrcode(scannerId);
 
     scanner
@@ -13,12 +14,17 @@ export default function QRScanner({ onScan, onError }) {
         { facingMode: "environment" },
         { fps: 10, qrbox: { width: 230, height: 230 } },
         async (decodedText) => {
+          if (handling || stopped) {
+            return;
+          }
+          handling = true;
           // Keep scanning until a decode is actually accepted by the page.
           const accepted = await Promise.resolve(onScan(decodedText));
           if (accepted && !stopped) {
             stopped = true;
             scanner.stop().catch(() => {});
           }
+          handling = false;
         },
         () => {}
       )

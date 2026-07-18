@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getPlayer, getPlayerAnswer, getQuizState, submitAnswer } from "../lib/api";
 import Leaderboard from "../components/Leaderboard";
@@ -18,6 +18,8 @@ export default function DashboardPage() {
   const [myAnswer, setMyAnswer] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const loadRequestRef = useRef(0);
+  const lastQuestionIdRef = useRef(null);
 
   useEffect(() => {
     if (!session) {
@@ -27,24 +29,30 @@ export default function DashboardPage() {
     let alive = true;
 
     const loadAll = async () => {
+      const requestId = ++loadRequestRef.current;
       try {
         const [p, quiz] = await Promise.all([getPlayer(session.id), getQuizState()]);
-        if (alive) {
+        if (alive && requestId === loadRequestRef.current) {
           setPlayer(p);
           setQuizState(quiz.state || null);
           setQuestion(quiz.question || null);
           setAnswerCount(quiz.answer_count || 0);
-          if (quiz.state?.current_question_id) {
-            const answerData = await getPlayerAnswer(quiz.state.current_question_id, session.id);
-            if (alive) {
-              setMyAnswer(answerData.answer || null);
-            }
-          } else {
+        }
+
+        const currentQuestionId = quiz.state?.current_question_id || null;
+        if (!currentQuestionId) {
+          if (alive && requestId === loadRequestRef.current) {
             setMyAnswer(null);
           }
+          return;
+        }
+
+        const answerData = await getPlayerAnswer(currentQuestionId, session.id);
+        if (alive && requestId === loadRequestRef.current) {
+          setMyAnswer(answerData.answer || null);
         }
       } catch (err) {
-        if (alive) {
+        if (alive && requestId === loadRequestRef.current) {
           setError(err.message || "Failed to load quiz state");
         }
       }
@@ -72,6 +80,16 @@ export default function DashboardPage() {
     };
   }, [session]);
 
+  useEffect(() => {
+    const currentQuestionId = quizState?.current_question_id || null;
+    if (lastQuestionIdRef.current !== currentQuestionId) {
+      lastQuestionIdRef.current = currentQuestionId;
+      setMyAnswer(null);
+      setBusy(false);
+      setSelected("A");
+    }
+  }, [quizState?.current_question_id]);
+
   const endsAtLabel = useMemo(() => {
     if (!quizState?.round_ends_at) {
       return "-";
@@ -84,11 +102,14 @@ export default function DashboardPage() {
       return;
     }
 
+    const submittingQuestionId = quizState.current_question_id;
     setBusy(true);
     setError("");
     try {
       const result = await submitAnswer(session.id, selected);
-      setMyAnswer(result.answer || null);
+      if (quizState?.current_question_id === submittingQuestionId) {
+        setMyAnswer(result.answer || null);
+      }
       const p = await getPlayer(session.id);
       setPlayer(p);
     } catch (err) {

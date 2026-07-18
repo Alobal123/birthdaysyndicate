@@ -1,5 +1,5 @@
-export const PLAYER_ID_KEY = "syndicate_player_id";
-export const PLAYER_NAME_KEY = "syndicate_player_name";
+export const PLAYER_ID_KEY = "pub_quiz_player_id";
+export const PLAYER_NAME_KEY = "pub_quiz_player_name";
 
 export function savePlayerSession(player) {
   localStorage.setItem(PLAYER_ID_KEY, player.id);

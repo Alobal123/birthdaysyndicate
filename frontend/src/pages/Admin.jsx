@@ -4,9 +4,19 @@ import { adminDelete, adminGet, adminPost } from "../lib/api";
 export default function AdminPage() {
   const [token, setToken] = useState("");
   const [players, setPlayers] = useState([]);
-  const [loot, setLoot] = useState([]);
-  const [itemType, setItemType] = useState("smoke_bomb");
-  const [count, setCount] = useState(10);
+  const [questions, setQuestions] = useState([]);
+  const [answers, setAnswers] = useState([]);
+  const [durationSeconds, setDurationSeconds] = useState(30);
+  const [selectedQuestionId, setSelectedQuestionId] = useState("");
+  const [draft, setDraft] = useState({
+    prompt: "",
+    option_a: "",
+    option_b: "",
+    option_c: "",
+    option_d: "",
+    correct_option: "A",
+    category: "General",
+  });
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
@@ -23,7 +33,7 @@ export default function AdminPage() {
   return (
     <main className="mx-auto max-w-6xl p-6">
       <section className="panel p-6 animate-riseIn">
-        <h1 className="font-display text-3xl text-ink">Admin Console</h1>
+        <h1 className="font-display text-3xl text-ink">Pub Quiz Admin</h1>
         <input
           className="mt-4 w-full max-w-md"
           type="password"
@@ -43,7 +53,7 @@ export default function AdminPage() {
           })}>Stop Game</button>
           <button className="btn-ghost" onClick={() => run(async () => {
             await adminPost("/game/reset", token);
-            setMessage("Game reset");
+            setMessage("Scores and answers reset");
           })}>Reset Scores</button>
           <button className="btn-ghost" onClick={() => run(async () => {
             const data = await adminGet("/players", token);
@@ -51,26 +61,124 @@ export default function AdminPage() {
             setMessage("Players loaded");
           })}>Load Players</button>
           <button className="btn-ghost" onClick={() => run(async () => {
-            const data = await adminGet("/loot", token);
-            setLoot(data.tokens || []);
-            setMessage("Loot loaded");
-          })}>Load Loot</button>
+            const data = await adminGet("/questions", token);
+            const loaded = data.questions || [];
+            setQuestions(loaded);
+            if (!selectedQuestionId && loaded.length) {
+              setSelectedQuestionId(loaded[0].id);
+            }
+            setMessage("Questions loaded");
+          })}>Load Questions</button>
+          <button className="btn-ghost" onClick={() => run(async () => {
+            const data = await adminGet("/answers/current", token);
+            setAnswers(data.answers || []);
+            setMessage("Answers loaded");
+          })}>Load Current Answers</button>
+          <button className="btn-ghost" onClick={() => run(async () => {
+            await adminPost("/questions/seed", token);
+            const data = await adminGet("/questions", token);
+            const loaded = data.questions || [];
+            setQuestions(loaded);
+            if (!selectedQuestionId && loaded.length) {
+              setSelectedQuestionId(loaded[0].id);
+            }
+            setMessage("Sample questions ready");
+          })}>Seed Questions</button>
         </div>
 
-        <div className="mt-6 grid gap-3 sm:grid-cols-[1fr_120px_auto] sm:items-end">
+        <div className="mt-6 grid gap-3 rounded-xl border border-ink/10 bg-white p-4">
+          <h2 className="font-display text-xl text-ink">Create Question</h2>
           <div>
-            <label className="text-sm font-semibold text-ink">Item Type</label>
-            <input className="mt-1 w-full" value={itemType} onChange={(e) => setItemType(e.target.value)} />
+            <label className="text-sm font-semibold text-ink">Prompt</label>
+            <input
+              className="mt-1 w-full"
+              value={draft.prompt}
+              onChange={(e) => setDraft((prev) => ({ ...prev, prompt: e.target.value }))}
+            />
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="text-sm font-semibold text-ink">Option A</label>
+              <input className="mt-1 w-full" value={draft.option_a} onChange={(e) => setDraft((prev) => ({ ...prev, option_a: e.target.value }))} />
+            </div>
+            <div>
+              <label className="text-sm font-semibold text-ink">Option B</label>
+              <input className="mt-1 w-full" value={draft.option_b} onChange={(e) => setDraft((prev) => ({ ...prev, option_b: e.target.value }))} />
+            </div>
+            <div>
+              <label className="text-sm font-semibold text-ink">Option C</label>
+              <input className="mt-1 w-full" value={draft.option_c} onChange={(e) => setDraft((prev) => ({ ...prev, option_c: e.target.value }))} />
+            </div>
+            <div>
+              <label className="text-sm font-semibold text-ink">Option D</label>
+              <input className="mt-1 w-full" value={draft.option_d} onChange={(e) => setDraft((prev) => ({ ...prev, option_d: e.target.value }))} />
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+            <div>
+              <label className="text-sm font-semibold text-ink">Correct Option</label>
+              <select
+                className="mt-1 w-full"
+                value={draft.correct_option}
+                onChange={(e) => setDraft((prev) => ({ ...prev, correct_option: e.target.value }))}
+              >
+                <option value="A">A</option>
+                <option value="B">B</option>
+                <option value="C">C</option>
+                <option value="D">D</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-sm font-semibold text-ink">Category</label>
+              <input className="mt-1 w-full" value={draft.category} onChange={(e) => setDraft((prev) => ({ ...prev, category: e.target.value }))} />
+            </div>
+            <button className="btn-accent" onClick={() => run(async () => {
+              await adminPost("/questions", token, draft);
+              const data = await adminGet("/questions", token);
+              const loaded = data.questions || [];
+              setQuestions(loaded);
+              if (!selectedQuestionId && loaded.length) {
+                setSelectedQuestionId(loaded[0].id);
+              }
+              setMessage("Question created");
+            })}>Create</button>
+          </div>
+        </div>
+
+        <div className="mt-6 grid gap-3 rounded-xl border border-ink/10 bg-white p-4 sm:grid-cols-[1fr_120px_auto_auto] sm:items-end">
+          <div>
+            <label className="text-sm font-semibold text-ink">Question To Activate</label>
+            <select className="mt-1 w-full" value={selectedQuestionId} onChange={(e) => setSelectedQuestionId(e.target.value)}>
+              <option value="">Select a question</option>
+              {questions.map((q) => (
+                <option key={q.id} value={q.id}>{q.prompt}</option>
+              ))}
+            </select>
           </div>
           <div>
-            <label className="text-sm font-semibold text-ink">Count</label>
-            <input className="mt-1 w-full" type="number" min="1" max="500" value={count} onChange={(e) => setCount(Number(e.target.value || 1))} />
+            <label className="text-sm font-semibold text-ink">Seconds</label>
+            <input
+              className="mt-1 w-full"
+              type="number"
+              min="5"
+              max="600"
+              value={durationSeconds}
+              onChange={(e) => setDurationSeconds(Number(e.target.value || 30))}
+            />
           </div>
-          <button className="btn-accent" onClick={() => run(async () => {
-            const data = await adminPost("/loot/generate", token, { item_type: itemType, count });
-            setLoot(data.tokens || []);
-            setMessage("Tokens generated");
-          })}>Generate Tokens</button>
+          <button className="btn-primary" onClick={() => run(async () => {
+            if (!selectedQuestionId) {
+              throw new Error("Pick a question first");
+            }
+            await adminPost("/questions/activate", token, { question_id: selectedQuestionId, duration_seconds: durationSeconds });
+            setMessage("Question activated");
+          })}>Activate Round</button>
+          <button className="btn-ghost" onClick={() => run(async () => {
+            await adminPost("/questions/reveal", token, { reveal: true });
+            setMessage("Answers revealed");
+          })}>Reveal Answer</button>
         </div>
 
         {message ? <p className="mt-4 text-sm text-mint">{message}</p> : null}
@@ -93,15 +201,31 @@ export default function AdminPage() {
           </div>
 
           <div className="rounded-xl border border-ink/10 bg-white p-4">
-            <h2 className="font-display text-xl text-ink">Loot Tokens</h2>
+            <h2 className="font-display text-xl text-ink">Question Bank</h2>
             <ul className="mt-3 max-h-80 space-y-2 overflow-auto text-xs">
-              {loot.map((row) => (
+              {questions.map((row) => (
                 <li key={row.id} className="rounded border border-ink/10 p-2">
-                  <p className="font-semibold text-ink">{row.item_type}</p>
-                  <p className="text-steel break-all">{row.token}</p>
-                  <p className={row.is_used ? "text-ember" : "text-mint"}>{row.is_used ? "USED" : "UNUSED"}</p>
+                  <p className="font-semibold text-ink">{row.prompt}</p>
+                  <p className="text-steel">A: {row.option_a}</p>
+                  <p className="text-steel">B: {row.option_b}</p>
+                  <p className="text-steel">C: {row.option_c}</p>
+                  <p className="text-steel">D: {row.option_d}</p>
+                  <p className="text-ink">Correct: {row.correct_option}</p>
                 </li>
               ))}
+            </ul>
+          </div>
+
+          <div className="rounded-xl border border-ink/10 bg-white p-4 md:col-span-2">
+            <h2 className="font-display text-xl text-ink">Current Round Answers</h2>
+            <ul className="mt-3 max-h-72 space-y-2 overflow-auto text-xs">
+              {answers.map((row) => (
+                <li key={row.id} className="flex items-center justify-between rounded border border-ink/10 p-2">
+                  <span>{row.player_name} answered {row.selected_option}</span>
+                  <span className={row.is_correct ? "text-mint" : "text-ember"}>{row.is_correct ? "Correct" : "Wrong"}</span>
+                </li>
+              ))}
+              {!answers.length ? <li className="text-sm text-steel">No answers yet for active question.</li> : null}
             </ul>
           </div>
         </div>

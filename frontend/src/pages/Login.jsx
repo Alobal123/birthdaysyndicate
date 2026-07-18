@@ -32,9 +32,9 @@ export default function LoginPage() {
   return (
     <main className="min-h-screen flex items-center justify-center p-6">
       <section className="panel w-full max-w-md p-7 animate-riseIn">
-        <p className="text-xs uppercase tracking-[0.22em] text-steel">The Great Birthday Syndicate</p>
-        <h1 className="mt-2 font-display text-3xl text-ink">Enter The Family</h1>
-        <p className="mt-2 text-sm text-steel">Use your name. No password. No mercy.</p>
+        <p className="text-xs uppercase tracking-[0.22em] text-steel">Birthday Syndicate</p>
+        <h1 className="mt-2 font-display text-3xl text-ink">Join The Pub Quiz</h1>
+        <p className="mt-2 text-sm text-steel">Use your name to join the live round.</p>
         <form onSubmit={onSubmit} className="mt-6 space-y-3">
           <input
             value={name}
@@ -45,7 +45,7 @@ export default function LoginPage() {
           />
           {error ? <p className="text-sm text-ember">{error}</p> : null}
           <button className="btn-primary w-full" type="submit" disabled={busy}>
-            {busy ? "Joining..." : "Join Game"}
+            {busy ? "Joining..." : "Join Quiz"}
           </button>
         </form>
       </section>

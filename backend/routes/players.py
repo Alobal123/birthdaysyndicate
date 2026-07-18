@@ -13,7 +13,7 @@ def create_player(body: CreatePlayerBody):
 
     existing = (
         client.table("players")
-        .select("id, name, score, inventory, created_at")
+        .select("id, name, score, created_at")
         .eq("name", normalized_name)
         .limit(1)
         .execute()
@@ -36,7 +36,7 @@ def get_player(player_id: str):
     client = get_supabase()
     result = (
         client.table("players")
-        .select("id, name, score, inventory, created_at")
+        .select("id, name, score, created_at")
         .eq("id", player_id)
         .maybe_single()
         .execute()

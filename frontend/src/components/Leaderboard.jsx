@@ -38,7 +38,7 @@ export default function Leaderboard() {
 
   return (
     <section className="panel p-4 animate-riseIn">
-      <h3 className="font-display text-lg font-bold text-ink">Leaderboard</h3>
+      <h3 className="font-display text-lg font-bold text-ink">Live Leaderboard</h3>
       {loading ? <p className="mt-3 text-sm text-steel">Loading...</p> : null}
       <ol className="mt-3 space-y-2">
         {rows.slice(0, 12).map((row, idx) => (

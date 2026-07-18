@@ -31,36 +31,23 @@ export function getLeaderboard() {
   return request("/api/leaderboard");
 }
 
-export function createEncounter(p1_id) {
-  return request("/api/encounters", {
+export function getQuizState() {
+  return request("/api/quiz/state");
+}
+
+export function submitAnswer(playerId, option) {
+  return request("/api/quiz/answer", {
     method: "POST",
-    body: JSON.stringify({ p1_id }),
+    body: JSON.stringify({ player_id: playerId, option }),
   });
 }
 
-export function getEncounter(encounterId) {
-  return request(`/api/encounters/${encounterId}`);
+export function getPlayerAnswer(questionId, playerId) {
+  return request(`/api/quiz/answers/${questionId}/${playerId}`);
 }
 
-export function joinEncounter(encounterId, player_id) {
-  return request(`/api/encounters/${encounterId}/join`, {
-    method: "PATCH",
-    body: JSON.stringify({ player_id }),
-  });
-}
-
-export function submitChoice(encounterId, player_id, choice, item = null) {
-  return request(`/api/encounters/${encounterId}/choice`, {
-    method: "PATCH",
-    body: JSON.stringify({ player_id, choice, item }),
-  });
-}
-
-export function claimLoot(player_id, token) {
-  return request("/api/loot/claim", {
-    method: "POST",
-    body: JSON.stringify({ player_id, token }),
-  });
+export function getPublicQuestions() {
+  return request("/api/questions");
 }
 
 export function adminPost(path, token, body = {}) {

@@ -11,11 +11,18 @@ load_dotenv(Path(__file__).with_name(".env"))
 
 app = FastAPI(title="Birthday Syndicate Pub Quiz API", version="0.2.0")
 
-origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",") if origin.strip()]
+origins_env = os.getenv("CORS_ORIGINS", "").strip()
+if origins_env:
+    origins = [origin.strip() for origin in origins_env.split(",") if origin.strip()]
+else:
+    # Safe default for initial deploys: allow browser access from any origin.
+    origins = ["*"]
+
+allow_credentials = "*" not in origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

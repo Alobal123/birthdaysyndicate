@@ -25,8 +25,6 @@ export default function App() {
         }
       />
       <Route path="/admin" element={<AdminPage />} />
-      <Route path="/encounter/*" element={<Navigate to="/dashboard" replace />} />
-      <Route path="/claim" element={<Navigate to="/dashboard" replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

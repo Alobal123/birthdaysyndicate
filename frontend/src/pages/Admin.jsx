@@ -30,6 +30,31 @@ export default function AdminPage() {
     }
   };
 
+  const validateQuestionDraft = () => {
+    const prompt = draft.prompt.trim();
+    const a = draft.option_a.trim();
+    const b = draft.option_b.trim();
+    const c = draft.option_c.trim();
+    const d = draft.option_d.trim();
+
+    if (prompt.length < 5) {
+      throw new Error("Prompt must be at least 5 characters.");
+    }
+    if (!a || !b || !c || !d) {
+      throw new Error("All answer options (A-D) are required.");
+    }
+
+    return {
+      prompt,
+      option_a: a,
+      option_b: b,
+      option_c: c,
+      option_d: d,
+      correct_option: draft.correct_option,
+      category: draft.category.trim() || null,
+    };
+  };
+
   return (
     <main className="mx-auto max-w-6xl p-6">
       <section className="panel p-6 animate-riseIn">
@@ -135,13 +160,23 @@ export default function AdminPage() {
               <input className="mt-1 w-full" value={draft.category} onChange={(e) => setDraft((prev) => ({ ...prev, category: e.target.value }))} />
             </div>
             <button className="btn-accent" onClick={() => run(async () => {
-              await adminPost("/questions", token, draft);
+              const payload = validateQuestionDraft();
+              await adminPost("/questions", token, payload);
               const data = await adminGet("/questions", token);
               const loaded = data.questions || [];
               setQuestions(loaded);
               if (!selectedQuestionId && loaded.length) {
                 setSelectedQuestionId(loaded[0].id);
               }
+              setDraft({
+                prompt: "",
+                option_a: "",
+                option_b: "",
+                option_c: "",
+                option_d: "",
+                correct_option: "A",
+                category: "General",
+              });
               setMessage("Question created");
             })}>Create</button>
           </div>

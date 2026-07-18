@@ -2,10 +2,10 @@ import secrets
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from database import get_admin_secret, get_supabase
-from models import ActivateQuestionBody, CreateQuestionBody, RevealAnswersBody
+from models import RevealAnswersBody
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -94,10 +94,49 @@ def delete_player(player_id: str):
 
 
 @router.post("/questions", dependencies=[Depends(require_admin)])
-def create_question(body: CreateQuestionBody):
+async def create_question(request: Request):
     client = get_supabase()
-    payload = body.model_dump()
-    payload["correct_option"] = body.correct_option.value
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+
+    def pick(*keys: str):
+        for key in keys:
+            if key in body:
+                return body.get(key)
+        return None
+
+    prompt = (pick("prompt") or "").strip()
+    option_a = (pick("option_a", "optionA") or "").strip()
+    option_b = (pick("option_b", "optionB") or "").strip()
+    option_c = (pick("option_c", "optionC") or "").strip()
+    option_d = (pick("option_d", "optionD") or "").strip()
+    correct_option = (pick("correct_option", "correctOption") or "").strip().upper()
+    category_raw = pick("category")
+    category = category_raw.strip() if isinstance(category_raw, str) else None
+
+    if len(prompt) < 5:
+        raise HTTPException(status_code=400, detail="Prompt must be at least 5 characters")
+    if not option_a or not option_b or not option_c or not option_d:
+        raise HTTPException(status_code=400, detail="All options A-D are required")
+    if correct_option not in {"A", "B", "C", "D"}:
+        raise HTTPException(status_code=400, detail="correct_option must be one of A, B, C, D")
+
+    payload = {
+        "prompt": prompt,
+        "option_a": option_a,
+        "option_b": option_b,
+        "option_c": option_c,
+        "option_d": option_d,
+        "correct_option": correct_option,
+        "category": category,
+    }
+
     res = client.table("quiz_questions").insert(payload).execute()
     if not res.data:
         raise HTTPException(status_code=500, detail="Question creation failed")
@@ -116,12 +155,35 @@ def list_questions():
 
 
 @router.post("/questions/activate", dependencies=[Depends(require_admin)])
-def activate_question(body: ActivateQuestionBody):
+async def activate_question(request: Request):
     client = get_supabase()
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+
+    question_id_raw = body.get("question_id", body.get("questionId"))
+    question_id = str(question_id_raw or "").strip()
+    if not question_id:
+        raise HTTPException(status_code=400, detail="question_id is required")
+
+    duration_raw = body.get("duration_seconds", body.get("durationSeconds", 30))
+    try:
+        duration_seconds = int(duration_raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="duration_seconds must be an integer")
+
+    if duration_seconds < 5 or duration_seconds > 600:
+        raise HTTPException(status_code=400, detail="duration_seconds must be between 5 and 600")
+
     question = (
         client.table("quiz_questions")
         .select("id")
-        .eq("id", body.question_id)
+        .eq("id", question_id)
         .maybe_single()
         .execute()
         .data
@@ -130,14 +192,14 @@ def activate_question(body: ActivateQuestionBody):
         raise HTTPException(status_code=404, detail="Question not found")
 
     now = datetime.now(timezone.utc)
-    ends_at = now + timedelta(seconds=body.duration_seconds)
+    ends_at = now + timedelta(seconds=duration_seconds)
     res = (
         client.table("game_state")
         .upsert(
             {
                 "id": 1,
                 "is_active": True,
-                "current_question_id": body.question_id,
+                "current_question_id": question_id,
                 "round_started_at": now.isoformat(),
                 "round_ends_at": ends_at.isoformat(),
                 "reveal_answers": False,
@@ -150,12 +212,27 @@ def activate_question(body: ActivateQuestionBody):
 
 
 @router.post("/questions/reveal", dependencies=[Depends(require_admin)])
-def reveal_answers(body: RevealAnswersBody):
+async def reveal_answers(request: Request):
     client = get_supabase()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    reveal = True
+    if isinstance(body, dict) and "reveal" in body:
+        reveal_raw = body.get("reveal")
+        if isinstance(reveal_raw, bool):
+            reveal = reveal_raw
+        elif isinstance(reveal_raw, str):
+            reveal = reveal_raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+        else:
+            reveal = bool(reveal_raw)
+
     now = datetime.now(timezone.utc).isoformat()
     res = (
         client.table("game_state")
-        .update({"reveal_answers": body.reveal, "updated_at": now})
+        .update({"reveal_answers": reveal, "updated_at": now})
         .eq("id", 1)
         .execute()
     )

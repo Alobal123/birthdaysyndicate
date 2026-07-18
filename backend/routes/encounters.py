@@ -90,15 +90,18 @@ def submit_answer(body: SubmitAnswerBody):
     if state.get("round_ends_at") and _now_iso() > state["round_ends_at"]:
         raise HTTPException(status_code=409, detail="Answer window is closed")
 
-    existing = (
+    existing_rows = (
         client.table("player_answers")
         .select("id, question_id, selected_option, is_correct, points_awarded, answered_at")
         .eq("player_id", body.player_id)
         .eq("question_id", state["current_question_id"])
-        .maybe_single()
+        .order("answered_at", desc=True)
+        .limit(1)
         .execute()
         .data
+        or []
     )
+    existing = existing_rows[0] if existing_rows else None
     if existing:
         return {"already_answered": True, "answer": existing}
 
@@ -139,13 +142,16 @@ def submit_answer(body: SubmitAnswerBody):
 @router.get("/quiz/answers/{question_id}/{player_id}")
 def get_player_answer(question_id: str, player_id: str):
     client = get_supabase()
-    answer = (
+    rows = (
         client.table("player_answers")
         .select("id, question_id, selected_option, is_correct, points_awarded, answered_at")
         .eq("question_id", question_id)
         .eq("player_id", player_id)
-        .maybe_single()
+        .order("answered_at", desc=True)
+        .limit(1)
         .execute()
         .data
+        or []
     )
+    answer = rows[0] if rows else None
     return {"answer": answer}

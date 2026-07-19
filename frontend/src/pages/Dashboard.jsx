@@ -14,6 +14,7 @@ export default function DashboardPage() {
   const [myAnswer, setMyAnswer] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [countdownSeconds, setCountdownSeconds] = useState(0);
   const loadRequestRef = useRef(0);
   const lastQuestionIdRef = useRef(null);
 
@@ -85,6 +86,35 @@ export default function DashboardPage() {
     }
   }, [quizState?.current_question_id]);
 
+  useEffect(() => {
+    if (!quizState?.is_active || !quizState?.round_ends_at) {
+      setCountdownSeconds(0);
+      return;
+    }
+
+    const getRemaining = () => {
+      const end = new Date(quizState.round_ends_at).getTime();
+      const now = Date.now();
+      return Math.max(0, Math.ceil((end - now) / 1000));
+    };
+
+    setCountdownSeconds(getRemaining());
+    const timer = window.setInterval(() => {
+      setCountdownSeconds(getRemaining());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [quizState?.is_active, quizState?.round_ends_at]);
+
+  const formatCountdown = (value) => {
+    const safe = Math.max(0, value || 0);
+    const minutes = Math.floor(safe / 60);
+    const seconds = safe % 60;
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  };
+
   const onSubmit = async () => {
     if (!session?.id || !quizState?.current_question_id || myAnswer || busy) {
       return;
@@ -112,6 +142,7 @@ export default function DashboardPage() {
   }
 
   const revealMode = Boolean(quizState?.reveal_answers && question?.correct_option);
+  const showQuestion = Boolean(question && (quizState?.is_active || revealMode));
 
   return (
     <main className="mx-auto max-w-3xl p-3 sm:p-4 md:p-8">
@@ -122,10 +153,13 @@ export default function DashboardPage() {
         </div>
 
         <div className="mt-5 rounded-2xl border border-ink/10 bg-white p-4 sm:p-5">
-          {!quizState?.is_active || !question ? (
+          {!showQuestion ? (
             <p className="text-base text-steel">No active question.</p>
           ) : (
             <>
+              {quizState?.is_active ? (
+                <p className="mb-2 font-display text-2xl text-ink">{formatCountdown(countdownSeconds)}</p>
+              ) : null}
               <p className="text-xl sm:text-2xl font-semibold leading-snug text-ink">{question.prompt}</p>
 
               <div className="mt-4 grid gap-3 sm:grid-cols-2">

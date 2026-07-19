@@ -14,6 +14,16 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_iso_datetime(value: str | None):
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
 def _fetch_player(player_id: str):
     client = get_supabase()
     return (
@@ -26,10 +36,95 @@ def _fetch_player(player_id: str):
     )
 
 
-@router.get("/quiz/state")
-def get_quiz_state():
-    client = get_supabase()
+def _score_and_finalize_round(client, question_id: str):
+    question = (
+        client.table("quiz_questions")
+        .select("id, correct_option")
+        .eq("id", question_id)
+        .maybe_single()
+        .execute()
+        .data
+    )
+    if not question:
+        return
+
+    answers = (
+        client.table("player_answers")
+        .select("id, player_id, selected_option, is_correct, points_awarded")
+        .eq("question_id", question_id)
+        .execute()
+        .data
+        or []
+    )
+
+    for answer in answers:
+        score = engine.score_answer(answer["selected_option"], question["correct_option"])
+        target_is_correct = score["is_correct"]
+        target_points = score["points_awarded"]
+
+        already_scored = (
+            bool(answer.get("is_correct")) == target_is_correct
+            and int(answer.get("points_awarded") or 0) == target_points
+        )
+
+        if not already_scored:
+            (
+                client.table("player_answers")
+                .update({"is_correct": target_is_correct, "points_awarded": target_points})
+                .eq("id", answer["id"])
+                .execute()
+            )
+
+            if target_points > 0:
+                player = _fetch_player(answer["player_id"])
+                if player:
+                    (
+                        client.table("players")
+                        .update({"score": int(player["score"] or 0) + target_points})
+                        .eq("id", answer["player_id"])
+                        .execute()
+                    )
+
+
+def _finalize_round_if_needed(client):
     state = (
+        client.table("game_state")
+        .select("id, is_active, current_question_id, round_ends_at, reveal_answers")
+        .eq("id", 1)
+        .maybe_single()
+        .execute()
+        .data
+    )
+    if not state:
+        return None
+
+    question_id = state.get("current_question_id")
+    if not question_id:
+        return state
+
+    ends_at = _parse_iso_datetime(state.get("round_ends_at"))
+    if not ends_at:
+        return state
+
+    now = datetime.now(timezone.utc)
+    if now < ends_at:
+        return state
+
+    if bool(state.get("is_active")) and not bool(state.get("reveal_answers")):
+        # Acquire a soft lock by flipping state with conditional filters.
+        lock_res = (
+            client.table("game_state")
+            .update({"is_active": False, "reveal_answers": True, "updated_at": _now_iso()})
+            .eq("id", 1)
+            .eq("is_active", True)
+            .eq("reveal_answers", False)
+            .eq("current_question_id", question_id)
+            .execute()
+        )
+        if lock_res.data:
+            _score_and_finalize_round(client, question_id)
+
+    return (
         client.table("game_state")
         .select("id, is_active, current_question_id, round_started_at, round_ends_at, reveal_answers, updated_at")
         .eq("id", 1)
@@ -37,6 +132,21 @@ def get_quiz_state():
         .execute()
         .data
     )
+
+
+@router.get("/quiz/state")
+def get_quiz_state():
+    client = get_supabase()
+    state = _finalize_round_if_needed(client)
+    if not state:
+        state = (
+            client.table("game_state")
+            .select("id, is_active, current_question_id, round_started_at, round_ends_at, reveal_answers, updated_at")
+            .eq("id", 1)
+            .maybe_single()
+            .execute()
+            .data
+        )
     if not state:
         raise HTTPException(status_code=500, detail="Game state missing")
 
@@ -71,6 +181,7 @@ def get_quiz_state():
 @router.post("/quiz/answer")
 def submit_answer(body: SubmitAnswerBody):
     client = get_supabase()
+    _finalize_round_if_needed(client)
 
     player = _fetch_player(body.player_id)
     if not player:
@@ -107,7 +218,7 @@ def submit_answer(body: SubmitAnswerBody):
 
     question = (
         client.table("quiz_questions")
-        .select("id, correct_option")
+        .select("id")
         .eq("id", state["current_question_id"])
         .maybe_single()
         .execute()
@@ -116,7 +227,6 @@ def submit_answer(body: SubmitAnswerBody):
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
 
-    score = engine.score_answer(body.option.value, question["correct_option"])
     inserted = (
         client.table("player_answers")
         .insert(
@@ -124,17 +234,14 @@ def submit_answer(body: SubmitAnswerBody):
                 "player_id": body.player_id,
                 "question_id": state["current_question_id"],
                 "selected_option": body.option.value,
-                "is_correct": score["is_correct"],
-                "points_awarded": score["points_awarded"],
+                "is_correct": False,
+                "points_awarded": 0,
             }
         )
         .execute()
     )
     if not inserted.data:
         raise HTTPException(status_code=500, detail="Failed to submit answer")
-
-    if score["points_awarded"] > 0:
-        client.table("players").update({"score": player["score"] + score["points_awarded"]}).eq("id", body.player_id).execute()
 
     return {"already_answered": False, "answer": inserted.data[0]}
 

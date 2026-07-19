@@ -33,8 +33,9 @@ class CreateQuestionBody(BaseModel):
     option_b: str = Field(min_length=1, max_length=200)
     option_c: str = Field(min_length=1, max_length=200)
     option_d: str = Field(min_length=1, max_length=200)
-    correct_option: AnswerOption
+    correct_option: Optional[AnswerOption] = None
     category: Optional[str] = Field(default=None, max_length=80)
+    duration_seconds: int = Field(default=30, ge=5, le=600)
 
 
 class ActivateQuestionBody(BaseModel):
@@ -44,3 +45,7 @@ class ActivateQuestionBody(BaseModel):
 
 class RevealAnswersBody(BaseModel):
     reveal: bool = True
+
+
+class SetSpecialPlayerBody(BaseModel):
+    special_player_id: Optional[str] = None

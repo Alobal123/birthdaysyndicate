@@ -171,7 +171,9 @@ export default function DashboardPage() {
   }
 
   const phase = quizState?.phase || (quizState?.is_active ? "OPEN" : quizState?.reveal_answers ? "REVEAL" : "IDLE");
-  const revealMode = Boolean(phase === "REVEAL" && question?.correct_option);
+  const birthdayAnswer = phase === "REVEAL" ? (quizState?.special_player_answer || null) : null;
+  const benchmarkOption = phase === "REVEAL" ? (question?.correct_option || null) : null;
+  const revealMode = Boolean(phase === "REVEAL");
   const showQuestion = Boolean(question && (phase === "OPEN" || phase === "REVEAL"));
 
   return (
@@ -197,14 +199,15 @@ export default function DashboardPage() {
                   const optionLabel = question[`option_${optionKey.toLowerCase()}`];
                   const isSelected = selected === optionKey;
                   const isLockedChoice = myAnswer?.selected_option === optionKey;
-                  const isCorrectOption = revealMode && question.correct_option === optionKey;
+                  const isCorrectOption = revealMode && benchmarkOption && benchmarkOption === optionKey;
+                  const isBirthdayOption = revealMode && birthdayAnswer && birthdayAnswer === optionKey;
                   const isWrongLockedOption = revealMode && isLockedChoice && !isCorrectOption;
 
                   let stateClass = "border-ink/20 bg-white text-ink";
                   if (isCorrectOption) {
                     stateClass = "border-mint bg-mint/20 text-ink";
                   } else if (isWrongLockedOption) {
-                    stateClass = "border-ember bg-ember/20 text-ink";
+                    stateClass = "border-pink-400 bg-pink-100 text-ink";
                   } else if (myAnswer && isLockedChoice) {
                     stateClass = "border-ink bg-ink text-white";
                   } else if (!myAnswer && isSelected) {
@@ -221,6 +224,7 @@ export default function DashboardPage() {
                     >
                       <span className="font-semibold mr-1">{optionKey}.</span>
                       <span>{optionLabel}</span>
+                      {isBirthdayOption ? <span className="ml-2" aria-label="birthday answer">🎉</span> : null}
                     </button>
                   );
                 })}

@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import DashboardPage from "./pages/Dashboard";
 import LoginPage from "./pages/Login";
 import AdminPage from "./pages/Admin";
+import AdminQuestionsPage from "./pages/AdminQuestions";
 import { loadPlayerSession } from "./lib/session";
 
 function RequirePlayer({ children }) {
@@ -25,6 +26,7 @@ export default function App() {
         }
       />
       <Route path="/admin" element={<AdminPage />} />
+      <Route path="/admin/questions" element={<AdminQuestionsPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

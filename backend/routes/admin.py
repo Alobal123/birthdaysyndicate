@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from database import get_admin_secret, get_supabase
 from engine import PubQuizEngine
-from models import RoundPhase
+from models import RoundPhase, SetSpecialPlayerBody
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 engine = PubQuizEngine(points_for_correct=10)
@@ -25,7 +25,7 @@ def _derive_round_phase(state: dict | None) -> str:
 def _get_state_with_phase(client):
     state = (
         client.table("game_state")
-        .select("id, is_active, current_question_id, round_started_at, round_ends_at, reveal_answers, updated_at")
+        .select("id, is_active, current_question_id, special_player_id, round_started_at, round_ends_at, reveal_answers, updated_at")
         .eq("id", 1)
         .maybe_single()
         .execute()
@@ -47,7 +47,30 @@ def _fetch_player_score(client, player_id: str):
     )
 
 
-def _finalize_question_scores(client, question_id: str):
+def _fetch_player_answer(client, player_id: str, question_id: str):
+    rows = (
+        client.table("player_answers")
+        .select("selected_option")
+        .eq("player_id", player_id)
+        .eq("question_id", question_id)
+        .order("answered_at", desc=True)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return rows[0]["selected_option"] if rows else None
+
+
+def _resolve_benchmark_option(client, question: dict, special_player_id: str | None, question_id: str):
+    if special_player_id:
+        special_answer = _fetch_player_answer(client, special_player_id, question_id)
+        if special_answer:
+            return special_answer
+    return question.get("correct_option")
+
+
+def _finalize_question_scores(client, question_id: str, special_player_id: str | None = None):
     question = (
         client.table("quiz_questions")
         .select("id, correct_option")
@@ -59,6 +82,7 @@ def _finalize_question_scores(client, question_id: str):
     if not question:
         return
 
+    special_answer = _fetch_player_answer(client, special_player_id, question_id) if special_player_id else None
     answers = (
         client.table("player_answers")
         .select("id, player_id, selected_option, is_correct, points_awarded")
@@ -69,7 +93,12 @@ def _finalize_question_scores(client, question_id: str):
     )
 
     for answer in answers:
-        score = engine.score_answer(answer["selected_option"], question["correct_option"])
+        score = engine.score_birthday_answer(
+            answer["selected_option"],
+            reference_option=question.get("correct_option"),
+            special_answer=special_answer,
+            is_special_player=bool(special_player_id and answer["player_id"] == special_player_id),
+        )
         target_is_correct = score["is_correct"]
         target_points = score["points_awarded"]
 
@@ -181,6 +210,38 @@ def delete_player(player_id: str):
     return {"deleted": len(res.data or []) > 0}
 
 
+@router.post("/game/special-player", dependencies=[Depends(require_admin)])
+def set_special_player(body: SetSpecialPlayerBody):
+    client = get_supabase()
+    now = datetime.now(timezone.utc).isoformat()
+
+    special_player_id = (body.special_player_id or "").strip() or None
+    if special_player_id:
+        player = (
+            client.table("players")
+            .select("id")
+            .eq("id", special_player_id)
+            .maybe_single()
+            .execute()
+            .data
+        )
+        if not player:
+            raise HTTPException(status_code=404, detail="Special player not found")
+
+    res = (
+        client.table("game_state")
+        .upsert(
+            {
+                "id": 1,
+                "special_player_id": special_player_id,
+                "updated_at": now,
+            }
+        )
+        .execute()
+    )
+    return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
+
+
 @router.post("/questions", dependencies=[Depends(require_admin)])
 async def create_question(request: Request):
     client = get_supabase()
@@ -204,16 +265,24 @@ async def create_question(request: Request):
     option_b = (pick("option_b", "optionB") or "").strip()
     option_c = (pick("option_c", "optionC") or "").strip()
     option_d = (pick("option_d", "optionD") or "").strip()
-    correct_option = (pick("correct_option", "correctOption") or "").strip().upper()
+    correct_option_raw = pick("correct_option", "correctOption")
+    correct_option = (str(correct_option_raw).strip().upper() if correct_option_raw is not None else "")
     category_raw = pick("category")
     category = category_raw.strip() if isinstance(category_raw, str) else None
+    duration_raw = pick("duration_seconds", "durationSeconds")
+    try:
+        duration_seconds = int(duration_raw if duration_raw is not None else 30)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="duration_seconds must be an integer")
 
     if len(prompt) < 5:
         raise HTTPException(status_code=400, detail="Prompt must be at least 5 characters")
     if not option_a or not option_b or not option_c or not option_d:
         raise HTTPException(status_code=400, detail="All options A-D are required")
-    if correct_option not in {"A", "B", "C", "D"}:
+    if correct_option and correct_option not in {"A", "B", "C", "D"}:
         raise HTTPException(status_code=400, detail="correct_option must be one of A, B, C, D")
+    if duration_seconds < 5 or duration_seconds > 600:
+        raise HTTPException(status_code=400, detail="duration_seconds must be between 5 and 600")
 
     payload = {
         "prompt": prompt,
@@ -221,8 +290,9 @@ async def create_question(request: Request):
         "option_b": option_b,
         "option_c": option_c,
         "option_d": option_d,
-        "correct_option": correct_option,
+        "correct_option": correct_option or None,
         "category": category,
+        "duration_seconds": duration_seconds,
     }
 
     res = client.table("quiz_questions").insert(payload).execute()
@@ -235,11 +305,29 @@ def list_questions():
     client = get_supabase()
     res = (
         client.table("quiz_questions")
-        .select("id, prompt, option_a, option_b, option_c, option_d, correct_option, category, created_at")
+        .select("id, prompt, option_a, option_b, option_c, option_d, correct_option, category, duration_seconds, created_at")
         .order("created_at", desc=True)
         .execute()
     )
     return {"questions": res.data or []}
+
+
+@router.delete("/questions/{question_id}", dependencies=[Depends(require_admin)])
+def delete_question(question_id: str):
+    client = get_supabase()
+    state = (
+        client.table("game_state")
+        .select("current_question_id, is_active, reveal_answers")
+        .eq("id", 1)
+        .maybe_single()
+        .execute()
+        .data
+    )
+    if (state or {}).get("current_question_id") == question_id:
+        raise HTTPException(status_code=409, detail="Cannot delete the current round question")
+
+    res = client.table("quiz_questions").delete().eq("id", question_id).execute()
+    return {"deleted": len(res.data or []) > 0}
 
 
 @router.post("/questions/activate", dependencies=[Depends(require_admin)])
@@ -259,18 +347,9 @@ async def activate_question(request: Request):
     if not question_id:
         raise HTTPException(status_code=400, detail="question_id is required")
 
-    duration_raw = body.get("duration_seconds", body.get("durationSeconds", 30))
-    try:
-        duration_seconds = int(duration_raw)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="duration_seconds must be an integer")
-
-    if duration_seconds < 5 or duration_seconds > 600:
-        raise HTTPException(status_code=400, detail="duration_seconds must be between 5 and 600")
-
     question = (
         client.table("quiz_questions")
-        .select("id")
+        .select("id, duration_seconds")
         .eq("id", question_id)
         .maybe_single()
         .execute()
@@ -278,6 +357,18 @@ async def activate_question(request: Request):
     )
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
+
+    duration_raw = body.get("duration_seconds", body.get("durationSeconds"))
+    if duration_raw is None:
+        duration_seconds = int(question.get("duration_seconds") or 30)
+    else:
+        try:
+            duration_seconds = int(duration_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="duration_seconds must be an integer")
+
+    if duration_seconds < 5 or duration_seconds > 600:
+        raise HTTPException(status_code=400, detail="duration_seconds must be between 5 and 600")
 
     now = datetime.now(timezone.utc)
     ends_at = now + timedelta(seconds=duration_seconds)
@@ -322,7 +413,7 @@ async def reveal_answers(request: Request):
     if reveal:
         state = (
             client.table("game_state")
-            .select("current_question_id")
+            .select("current_question_id, special_player_id")
             .eq("id", 1)
             .maybe_single()
             .execute()
@@ -330,7 +421,7 @@ async def reveal_answers(request: Request):
         )
         question_id = (state or {}).get("current_question_id")
         if question_id:
-            _finalize_question_scores(client, question_id)
+            _finalize_question_scores(client, question_id, (state or {}).get("special_player_id"))
 
         res = (
             client.table("game_state")
@@ -371,6 +462,7 @@ def seed_questions():
             "option_d": "Saturn",
             "correct_option": "B",
             "category": f"General-{nonce}",
+            "duration_seconds": 30,
         },
         {
             "prompt": "How many players are on the field per football team in a standard match?",
@@ -380,6 +472,7 @@ def seed_questions():
             "option_d": "12",
             "correct_option": "C",
             "category": f"Sports-{nonce}",
+            "duration_seconds": 20,
         },
         {
             "prompt": "What does HTTP stand for?",
@@ -389,6 +482,7 @@ def seed_questions():
             "option_d": "Host Transfer Text Protocol",
             "correct_option": "A",
             "category": f"Tech-{nonce}",
+            "duration_seconds": 45,
         },
     ]
     res = client.table("quiz_questions").insert(rows).execute()
@@ -400,7 +494,7 @@ def current_answers():
     client = get_supabase()
     state = (
         client.table("game_state")
-        .select("current_question_id")
+        .select("current_question_id, special_player_id")
         .eq("id", 1)
         .maybe_single()
         .execute()
@@ -437,4 +531,13 @@ def current_answers():
     for row in answers:
         decorated.append({**row, "player_name": name_by_id.get(row["player_id"], "Unknown")})
 
-    return {"answers": decorated}
+    special_player_id = (state or {}).get("special_player_id")
+    special_player_answer = None
+    if special_player_id and question_id:
+        special_player_answer = _fetch_player_answer(client, special_player_id, question_id)
+
+    return {
+        "answers": decorated,
+        "special_player_id": special_player_id,
+        "special_player_answer": special_player_answer,
+    }

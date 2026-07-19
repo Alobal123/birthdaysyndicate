@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
@@ -8,6 +9,16 @@ from models import RoundPhase, SubmitAnswerBody
 
 router = APIRouter(prefix="/api", tags=["quiz"])
 engine = PubQuizEngine(points_for_correct=10)
+
+
+def _response_data_dict(response) -> dict[str, Any] | None:
+    data = getattr(response, "data", None)
+    return data if isinstance(data, dict) else None
+
+
+def _response_data_list(response) -> list[dict[str, Any]]:
+    data = getattr(response, "data", None)
+    return data if isinstance(data, list) else []
 
 
 def _now_iso() -> str:
@@ -26,14 +37,35 @@ def _parse_iso_datetime(value: str | None):
 
 def _fetch_player(player_id: str):
     client = get_supabase()
-    return (
+    response = (
         client.table("players")
         .select("id, score")
         .eq("id", player_id)
         .maybe_single()
         .execute()
-        .data
     )
+    return _response_data_dict(response)
+
+
+def _fetch_player_answer(client, player_id: str, question_id: str):
+    rows = _response_data_list(
+        client.table("player_answers")
+        .select("selected_option")
+        .eq("player_id", player_id)
+        .eq("question_id", question_id)
+        .order("answered_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return rows[0]["selected_option"] if rows else None
+
+
+def _resolve_benchmark_option(client, question: dict, special_player_id: str | None, question_id: str):
+    if special_player_id:
+        special_answer = _fetch_player_answer(client, special_player_id, question_id)
+        if special_answer:
+            return special_answer
+    return question.get("correct_option")
 
 
 def _derive_round_phase(state: dict | None) -> str:
@@ -53,29 +85,33 @@ def _with_phase(state: dict | None):
     return state
 
 
-def _score_and_finalize_round(client, question_id: str):
-    question = (
+def _score_and_finalize_round(client, question_id: str, special_player_id: str | None = None):
+    question = _response_data_dict(
         client.table("quiz_questions")
         .select("id, correct_option")
         .eq("id", question_id)
         .maybe_single()
         .execute()
-        .data
     )
     if not question:
         return
 
-    answers = (
+    special_answer = _fetch_player_answer(client, special_player_id, question_id) if special_player_id else None
+
+    answers = _response_data_list(
         client.table("player_answers")
         .select("id, player_id, selected_option, is_correct, points_awarded")
         .eq("question_id", question_id)
         .execute()
-        .data
-        or []
     )
 
     for answer in answers:
-        score = engine.score_answer(answer["selected_option"], question["correct_option"])
+        score = engine.score_birthday_answer(
+            answer["selected_option"],
+            reference_option=question.get("correct_option"),
+            special_answer=special_answer,
+            is_special_player=bool(special_player_id and answer["player_id"] == special_player_id),
+        )
         target_is_correct = score["is_correct"]
         target_points = score["points_awarded"]
 
@@ -95,22 +131,22 @@ def _score_and_finalize_round(client, question_id: str):
             if target_points > 0:
                 player = _fetch_player(answer["player_id"])
                 if player:
+                    player_score = int(player.get("score") or 0)
                     (
                         client.table("players")
-                        .update({"score": int(player["score"] or 0) + target_points})
+                        .update({"score": player_score + target_points})
                         .eq("id", answer["player_id"])
                         .execute()
                     )
 
 
 def _finalize_round_if_needed(client):
-    state = (
+    state = _response_data_dict(
         client.table("game_state")
-        .select("id, is_active, current_question_id, round_ends_at, reveal_answers")
+        .select("id, is_active, current_question_id, special_player_id, round_ends_at, reveal_answers")
         .eq("id", 1)
         .maybe_single()
         .execute()
-        .data
     )
     if not state:
         return None
@@ -138,17 +174,16 @@ def _finalize_round_if_needed(client):
             .execute()
         )
         if lock_res.data:
-            _score_and_finalize_round(client, question_id)
+            _score_and_finalize_round(client, question_id, state.get("special_player_id"))
 
     final_state = (
         client.table("game_state")
-        .select("id, is_active, current_question_id, round_started_at, round_ends_at, reveal_answers, updated_at")
+        .select("id, is_active, current_question_id, special_player_id, round_started_at, round_ends_at, reveal_answers, updated_at")
         .eq("id", 1)
         .maybe_single()
         .execute()
-        .data
     )
-    return _with_phase(final_state)
+    return _with_phase(_response_data_dict(final_state) if final_state else None)
 
 
 @router.get("/quiz/state")
@@ -156,13 +191,12 @@ def get_quiz_state():
     client = get_supabase()
     state = _finalize_round_if_needed(client)
     if not state:
-        state = (
+        state = _response_data_dict(
             client.table("game_state")
-            .select("id, is_active, current_question_id, round_started_at, round_ends_at, reveal_answers, updated_at")
+            .select("id, is_active, current_question_id, special_player_id, round_started_at, round_ends_at, reveal_answers, updated_at")
             .eq("id", 1)
             .maybe_single()
             .execute()
-            .data
         )
         state = _with_phase(state)
     if not state:
@@ -171,25 +205,29 @@ def get_quiz_state():
     question = None
     if state.get("current_question_id"):
         question = (
+            _response_data_dict(
             client.table("quiz_questions")
             .select("id, prompt, option_a, option_b, option_c, option_d, correct_option, category")
             .eq("id", state["current_question_id"])
             .maybe_single()
             .execute()
-            .data
+            )
         )
         if question and not state.get("reveal_answers"):
             question.pop("correct_option", None)
 
+    if state.get("reveal_answers") and state.get("current_question_id") and state.get("special_player_id"):
+        special_answer = _fetch_player_answer(client, state["special_player_id"], state["current_question_id"])
+        if special_answer:
+            state["special_player_answer"] = special_answer
+
     answer_count = 0
     if state.get("current_question_id"):
-        answers = (
+        answers = _response_data_list(
             client.table("player_answers")
             .select("id")
             .eq("question_id", state["current_question_id"])
             .execute()
-            .data
-            or []
         )
         answer_count = len(answers)
 
@@ -205,26 +243,24 @@ def submit_answer(body: SubmitAnswerBody):
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    state = (
+    state = _response_data_dict(
         client.table("game_state")
-        .select("id, is_active, current_question_id, round_ends_at")
+        .select("id, is_active, current_question_id, special_player_id, round_ends_at")
         .eq("id", 1)
         .maybe_single()
         .execute()
-        .data
     )
 
     # Re-check expiration against parsed datetime to avoid string/clock edge cases.
     ends_at = _parse_iso_datetime((state or {}).get("round_ends_at"))
     if state and ends_at and datetime.now(timezone.utc) >= ends_at:
         _finalize_round_if_needed(client)
-        state = (
+        state = _response_data_dict(
             client.table("game_state")
-            .select("id, is_active, current_question_id, round_ends_at")
+            .select("id, is_active, current_question_id, special_player_id, round_ends_at")
             .eq("id", 1)
             .maybe_single()
             .execute()
-            .data
         )
 
     if not state or not state.get("is_active") or not state.get("current_question_id"):
@@ -234,7 +270,7 @@ def submit_answer(body: SubmitAnswerBody):
     if ends_at and datetime.now(timezone.utc) >= ends_at:
         raise HTTPException(status_code=409, detail="Answer window is closed")
 
-    existing_rows = (
+    existing_rows = _response_data_list(
         client.table("player_answers")
         .select("id, question_id, selected_option, is_correct, points_awarded, answered_at")
         .eq("player_id", body.player_id)
@@ -242,25 +278,22 @@ def submit_answer(body: SubmitAnswerBody):
         .order("answered_at", desc=True)
         .limit(1)
         .execute()
-        .data
-        or []
     )
     existing = existing_rows[0] if existing_rows else None
     if existing:
         return {"already_answered": True, "answer": existing}
 
-    question = (
+    question = _response_data_dict(
         client.table("quiz_questions")
         .select("id")
         .eq("id", state["current_question_id"])
         .maybe_single()
         .execute()
-        .data
     )
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
 
-    inserted = (
+    inserted = _response_data_list(
         client.table("player_answers")
         .insert(
             {
@@ -273,16 +306,16 @@ def submit_answer(body: SubmitAnswerBody):
         )
         .execute()
     )
-    if not inserted.data:
+    if not inserted:
         raise HTTPException(status_code=500, detail="Failed to submit answer")
 
-    return {"already_answered": False, "answer": inserted.data[0]}
+    return {"already_answered": False, "answer": inserted[0]}
 
 
 @router.get("/quiz/answers/{question_id}/{player_id}")
 def get_player_answer(question_id: str, player_id: str):
     client = get_supabase()
-    rows = (
+    rows = _response_data_list(
         client.table("player_answers")
         .select("id, question_id, selected_option, is_correct, points_awarded, answered_at")
         .eq("question_id", question_id)
@@ -290,8 +323,6 @@ def get_player_answer(question_id: str, player_id: str):
         .order("answered_at", desc=True)
         .limit(1)
         .execute()
-        .data
-        or []
     )
     answer = rows[0] if rows else None
     return {"answer": answer}

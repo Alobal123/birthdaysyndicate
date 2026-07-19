@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { adminDelete, adminGet, adminPost, getQuizState } from "../lib/api";
+import AdminNav from "../components/AdminNav";
 import { supabase } from "../lib/supabase";
 
 const ADMIN_TOKEN_KEY = "pub_quiz_admin_token";
@@ -10,20 +11,16 @@ export default function AdminPage() {
   const [questions, setQuestions] = useState([]);
   const [answers, setAnswers] = useState([]);
   const [quizState, setQuizState] = useState(null);
-  const [durationSeconds, setDurationSeconds] = useState(30);
   const [selectedQuestionId, setSelectedQuestionId] = useState("");
-  const [draft, setDraft] = useState({
-    prompt: "",
-    option_a: "",
-    option_b: "",
-    option_c: "",
-    option_d: "",
-    correct_option: "A",
-    category: "General",
-  });
+  const [countdownSeconds, setCountdownSeconds] = useState(0);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
+  const selectedQuestionIdRef = useRef("");
+
+  useEffect(() => {
+    selectedQuestionIdRef.current = selectedQuestionId;
+  }, [selectedQuestionId]);
 
   const run = async (fn) => {
     setError("");
@@ -57,9 +54,18 @@ export default function AdminPage() {
       setPlayers(playersData.players || []);
       const loadedQuestions = questionsData.questions || [];
       setQuestions(loadedQuestions);
-      if (!selectedQuestionId && loadedQuestions.length) {
-        setSelectedQuestionId(loadedQuestions[0].id);
-      }
+      setSelectedQuestionId((currentSelectedId) => {
+        const activeSelectedId = currentSelectedId || selectedQuestionIdRef.current;
+        if (activeSelectedId && loadedQuestions.some((question) => question.id === activeSelectedId)) {
+          return activeSelectedId;
+        }
+
+        if (loadedQuestions.length) {
+          return loadedQuestions[0].id;
+        }
+
+        return "";
+      });
       setAnswers(answersData.answers || []);
       setQuizState(stateData.state || null);
     } finally {
@@ -130,35 +136,53 @@ export default function AdminPage() {
     return "text-steel";
   }, [phase]);
 
-  const validateQuestionDraft = () => {
-    const prompt = draft.prompt.trim();
-    const a = draft.option_a.trim();
-    const b = draft.option_b.trim();
-    const c = draft.option_c.trim();
-    const d = draft.option_d.trim();
+  const birthdayPlayer = useMemo(
+    () => players.find((player) => player.id === quizState?.special_player_id),
+    [players, quizState?.special_player_id]
+  );
 
-    if (prompt.length < 5) {
-      throw new Error("Prompt must be at least 5 characters.");
-    }
-    if (!a || !b || !c || !d) {
-      throw new Error("All answer options (A-D) are required.");
+  const handleSpecialPlayerChange = (playerId, checked) =>
+    run(async () => {
+      await adminPost("/game/special-player", token, {
+        special_player_id: checked ? playerId : null,
+      });
+      setMessage(checked ? "Birthday player selected" : "Birthday player cleared");
+    });
+
+  useEffect(() => {
+    if (phase !== "OPEN" || !quizState?.round_ends_at) {
+      setCountdownSeconds(0);
+      return;
     }
 
-    return {
-      prompt,
-      option_a: a,
-      option_b: b,
-      option_c: c,
-      option_d: d,
-      correct_option: draft.correct_option,
-      category: draft.category.trim() || null,
+    const getRemaining = () => {
+      const end = new Date(quizState.round_ends_at).getTime();
+      const now = Date.now();
+      return Math.max(0, Math.ceil((end - now) / 1000));
     };
+
+    setCountdownSeconds(getRemaining());
+    const timer = window.setInterval(() => {
+      setCountdownSeconds(getRemaining());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [phase, quizState?.round_ends_at]);
+
+  const formatCountdown = (value) => {
+    const safe = Math.max(0, value || 0);
+    const minutes = Math.floor(safe / 60);
+    const seconds = safe % 60;
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   };
 
   return (
     <main className="mx-auto max-w-6xl p-6">
       <section className="panel p-6 animate-riseIn">
         <h1 className="font-display text-3xl text-ink">Pub Quiz Admin</h1>
+        <AdminNav />
         <input
           className="mt-4 w-full max-w-md"
           type="password"
@@ -170,6 +194,16 @@ export default function AdminPage() {
         <div className="mt-4 rounded-xl border border-ink/10 bg-white p-4">
           <p className="text-xs uppercase tracking-[0.22em] text-steel">Round Status</p>
           <p className={`mt-1 font-display text-2xl ${phaseLabelClass}`}>{phase}</p>
+          <p className="mt-1 text-sm text-steel">
+            {phase === "OPEN"
+              ? `Time left: ${formatCountdown(countdownSeconds)}`
+              : phase === "REVEAL"
+                ? "Answers revealed"
+                : "Waiting for next round"}
+          </p>
+          {birthdayPlayer ? (
+            <p className="mt-1 text-sm text-steel">Birthday player: {birthdayPlayer.name}</p>
+          ) : null}
           <p className="mt-1 text-sm text-steel">{loading ? "Syncing..." : `${players.length} players • ${answers.length} answers`}</p>
         </div>
 
@@ -184,7 +218,7 @@ export default function AdminPage() {
             if (!selectedQuestionId) {
               throw new Error("Pick a question first");
             }
-            await adminPost("/questions/activate", token, { question_id: selectedQuestionId, duration_seconds: durationSeconds });
+            await adminPost("/questions/activate", token, { question_id: selectedQuestionId });
             setMessage("Round started");
           })}>
             {phase === "OPEN" ? "End & Reveal Round" : "Start Round"}
@@ -193,81 +227,6 @@ export default function AdminPage() {
             await adminPost("/game/reset", token);
             setMessage("Scores and answers reset");
           })}>Reset Scores</button>
-          <button className="btn-ghost" onClick={() => run(async () => {
-            await adminPost("/questions/seed", token);
-            setMessage("Sample questions ready");
-          })}>Seed Questions</button>
-        </div>
-
-        <div className="mt-6 grid gap-3 rounded-xl border border-ink/10 bg-white p-4">
-          <h2 className="font-display text-xl text-ink">Create Question</h2>
-          <div>
-            <label className="text-sm font-semibold text-ink">Prompt</label>
-            <input
-              className="mt-1 w-full"
-              value={draft.prompt}
-              onChange={(e) => setDraft((prev) => ({ ...prev, prompt: e.target.value }))}
-            />
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label className="text-sm font-semibold text-ink">Option A</label>
-              <input className="mt-1 w-full" value={draft.option_a} onChange={(e) => setDraft((prev) => ({ ...prev, option_a: e.target.value }))} />
-            </div>
-            <div>
-              <label className="text-sm font-semibold text-ink">Option B</label>
-              <input className="mt-1 w-full" value={draft.option_b} onChange={(e) => setDraft((prev) => ({ ...prev, option_b: e.target.value }))} />
-            </div>
-            <div>
-              <label className="text-sm font-semibold text-ink">Option C</label>
-              <input className="mt-1 w-full" value={draft.option_c} onChange={(e) => setDraft((prev) => ({ ...prev, option_c: e.target.value }))} />
-            </div>
-            <div>
-              <label className="text-sm font-semibold text-ink">Option D</label>
-              <input className="mt-1 w-full" value={draft.option_d} onChange={(e) => setDraft((prev) => ({ ...prev, option_d: e.target.value }))} />
-            </div>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
-            <div>
-              <label className="text-sm font-semibold text-ink">Correct Option</label>
-              <select
-                className="mt-1 w-full"
-                value={draft.correct_option}
-                onChange={(e) => setDraft((prev) => ({ ...prev, correct_option: e.target.value }))}
-              >
-                <option value="A">A</option>
-                <option value="B">B</option>
-                <option value="C">C</option>
-                <option value="D">D</option>
-              </select>
-            </div>
-            <div>
-              <label className="text-sm font-semibold text-ink">Category</label>
-              <input className="mt-1 w-full" value={draft.category} onChange={(e) => setDraft((prev) => ({ ...prev, category: e.target.value }))} />
-            </div>
-            <button className="btn-accent" onClick={() => run(async () => {
-              const payload = validateQuestionDraft();
-              await adminPost("/questions", token, payload);
-              const data = await adminGet("/questions", token);
-              const loaded = data.questions || [];
-              setQuestions(loaded);
-              if (!selectedQuestionId && loaded.length) {
-                setSelectedQuestionId(loaded[0].id);
-              }
-              setDraft({
-                prompt: "",
-                option_a: "",
-                option_b: "",
-                option_c: "",
-                option_d: "",
-                correct_option: "A",
-                category: "General",
-              });
-              setMessage("Question created");
-            })}>Create</button>
-          </div>
         </div>
 
         <div className="mt-6 grid gap-3 rounded-xl border border-ink/10 bg-white p-4 sm:grid-cols-[1fr_120px] sm:items-end">
@@ -276,20 +235,9 @@ export default function AdminPage() {
             <select className="mt-1 w-full" value={selectedQuestionId} onChange={(e) => setSelectedQuestionId(e.target.value)}>
               <option value="">Select a question</option>
               {questions.map((q) => (
-                <option key={q.id} value={q.id}>{q.prompt}</option>
+                <option key={q.id} value={q.id}>{q.prompt} ({q.duration_seconds || 30}s)</option>
               ))}
             </select>
-          </div>
-          <div>
-            <label className="text-sm font-semibold text-ink">Seconds</label>
-            <input
-              className="mt-1 w-full"
-              type="number"
-              min="5"
-              max="600"
-              value={durationSeconds}
-              onChange={(e) => setDurationSeconds(Number(e.target.value || 30))}
-            />
           </div>
         </div>
 
@@ -302,27 +250,21 @@ export default function AdminPage() {
             <ul className="mt-3 space-y-2 text-sm">
               {players.map((p) => (
                 <li key={p.id} className="flex items-center justify-between gap-2 rounded border border-ink/10 p-2">
-                  <span>{p.name} ({p.score})</span>
+                  <span className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={p.id === quizState?.special_player_id}
+                      onChange={(e) => handleSpecialPlayerChange(p.id, e.target.checked)}
+                      disabled={!token}
+                      title="Mark as birthday player"
+                    />
+                    <span>{p.name} ({p.score})</span>
+                    {p.id === quizState?.special_player_id ? <span className="rounded-full bg-mint/20 px-2 py-0.5 text-xs font-semibold text-mint">Birthday</span> : null}
+                  </span>
                   <button className="btn-ghost" onClick={() => run(async () => {
                     await adminDelete(`/players/${p.id}`, token);
                     setPlayers((old) => old.filter((x) => x.id !== p.id));
                   })}>Delete</button>
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <div className="rounded-xl border border-ink/10 bg-white p-4">
-            <h2 className="font-display text-xl text-ink">Question Bank</h2>
-            <ul className="mt-3 max-h-80 space-y-2 overflow-auto text-xs">
-              {questions.map((row) => (
-                <li key={row.id} className="rounded border border-ink/10 p-2">
-                  <p className="font-semibold text-ink">{row.prompt}</p>
-                  <p className="text-steel">A: {row.option_a}</p>
-                  <p className="text-steel">B: {row.option_b}</p>
-                  <p className="text-steel">C: {row.option_c}</p>
-                  <p className="text-steel">D: {row.option_d}</p>
-                  <p className="text-ink">Correct: {row.correct_option}</p>
                 </li>
               ))}
             </ul>
@@ -333,7 +275,10 @@ export default function AdminPage() {
             <ul className="mt-3 max-h-72 space-y-2 overflow-auto text-xs">
               {answers.map((row) => (
                 <li key={row.id} className="flex items-center justify-between rounded border border-ink/10 p-2">
-                  <span>{row.player_name} answered {row.selected_option}</span>
+                  <span className="flex items-center gap-2">
+                    <span>{row.player_name} answered {row.selected_option}</span>
+                    {row.player_id === quizState?.special_player_id ? <span aria-label="birthday answer">🎉</span> : null}
+                  </span>
                   <span className={row.is_correct ? "text-mint" : "text-ember"}>{row.is_correct ? "Correct" : "Wrong"}</span>
                 </li>
               ))}

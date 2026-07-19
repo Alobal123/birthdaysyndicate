@@ -108,6 +108,35 @@ export default function DashboardPage() {
     };
   }, [quizState?.is_active, quizState?.round_ends_at]);
 
+  useEffect(() => {
+    if (countdownSeconds !== 0 || !quizState?.is_active || !quizState?.current_question_id) {
+      return;
+    }
+
+    let alive = true;
+
+    const finalizeAndRefresh = async () => {
+      try {
+        const quiz = await getQuizState();
+        if (!alive) {
+          return;
+        }
+        setQuizState(quiz.state || null);
+        setQuestion(quiz.question || null);
+      } catch (err) {
+        if (alive) {
+          setError(err.message || "Failed to refresh quiz state");
+        }
+      }
+    };
+
+    finalizeAndRefresh();
+
+    return () => {
+      alive = false;
+    };
+  }, [countdownSeconds, quizState?.current_question_id, quizState?.is_active]);
+
   const formatCountdown = (value) => {
     const safe = Math.max(0, value || 0);
     const minutes = Math.floor(safe / 60);
@@ -116,7 +145,7 @@ export default function DashboardPage() {
   };
 
   const onSubmit = async () => {
-    if (!session?.id || !quizState?.current_question_id || myAnswer || busy) {
+    if (!session?.id || !quizState?.current_question_id || !quizState?.is_active || countdownSeconds <= 0 || myAnswer || busy) {
       return;
     }
 
@@ -141,8 +170,9 @@ export default function DashboardPage() {
     return null;
   }
 
-  const revealMode = Boolean(quizState?.reveal_answers && question?.correct_option);
-  const showQuestion = Boolean(question && (quizState?.is_active || revealMode));
+  const phase = quizState?.phase || (quizState?.is_active ? "OPEN" : quizState?.reveal_answers ? "REVEAL" : "IDLE");
+  const revealMode = Boolean(phase === "REVEAL" && question?.correct_option);
+  const showQuestion = Boolean(question && (phase === "OPEN" || phase === "REVEAL"));
 
   return (
     <main className="mx-auto max-w-3xl p-3 sm:p-4 md:p-8">
@@ -157,7 +187,7 @@ export default function DashboardPage() {
             <p className="text-base text-steel">No active question.</p>
           ) : (
             <>
-              {quizState?.is_active ? (
+              {phase === "OPEN" ? (
                 <p className="mb-2 font-display text-2xl text-ink">{formatCountdown(countdownSeconds)}</p>
               ) : null}
               <p className="text-xl sm:text-2xl font-semibold leading-snug text-ink">{question.prompt}</p>
@@ -196,11 +226,17 @@ export default function DashboardPage() {
                 })}
               </div>
 
-              <div className="mt-5">
-                <button className="btn-accent w-full sm:w-auto min-h-12 px-6 text-base" onClick={onSubmit} disabled={!!myAnswer || busy}>
-                  {busy ? "Submitting..." : myAnswer ? "Locked In" : "Lock In"}
-                </button>
-              </div>
+              {!myAnswer ? (
+                <div className="mt-5">
+                  <button
+                    className="btn-accent w-full sm:w-auto min-h-12 px-6 text-base"
+                    onClick={onSubmit}
+                    disabled={phase !== "OPEN" || countdownSeconds <= 0 || busy}
+                  >
+                    {busy ? "Submitting..." : "Lock In"}
+                  </button>
+                </div>
+              ) : null}
             </>
           )}
           {error ? <p className="mt-4 text-sm sm:text-base text-ember">{error}</p> : null}

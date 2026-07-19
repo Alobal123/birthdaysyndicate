@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException
 
 from database import get_supabase
 from engine import PubQuizEngine
-from models import SubmitAnswerBody
+from models import RoundPhase, SubmitAnswerBody
 
 router = APIRouter(prefix="/api", tags=["quiz"])
 engine = PubQuizEngine(points_for_correct=10)
@@ -34,6 +34,23 @@ def _fetch_player(player_id: str):
         .execute()
         .data
     )
+
+
+def _derive_round_phase(state: dict | None) -> str:
+    if not state or not state.get("current_question_id"):
+        return RoundPhase.IDLE.value
+    if state.get("is_active"):
+        return RoundPhase.OPEN.value
+    if state.get("reveal_answers"):
+        return RoundPhase.REVEAL.value
+    return RoundPhase.CLOSED.value
+
+
+def _with_phase(state: dict | None):
+    if not state:
+        return state
+    state["phase"] = _derive_round_phase(state)
+    return state
 
 
 def _score_and_finalize_round(client, question_id: str):
@@ -100,31 +117,30 @@ def _finalize_round_if_needed(client):
 
     question_id = state.get("current_question_id")
     if not question_id:
-        return state
+        return _with_phase(state)
 
     ends_at = _parse_iso_datetime(state.get("round_ends_at"))
     if not ends_at:
-        return state
+        return _with_phase(state)
 
     now = datetime.now(timezone.utc)
     if now < ends_at:
-        return state
+        return _with_phase(state)
 
-    if bool(state.get("is_active")) and not bool(state.get("reveal_answers")):
-        # Acquire a soft lock by flipping state with conditional filters.
+    if bool(state.get("is_active")):
+        # Acquire a soft lock by flipping active off for the current question.
         lock_res = (
             client.table("game_state")
             .update({"is_active": False, "reveal_answers": True, "updated_at": _now_iso()})
             .eq("id", 1)
             .eq("is_active", True)
-            .eq("reveal_answers", False)
             .eq("current_question_id", question_id)
             .execute()
         )
         if lock_res.data:
             _score_and_finalize_round(client, question_id)
 
-    return (
+    final_state = (
         client.table("game_state")
         .select("id, is_active, current_question_id, round_started_at, round_ends_at, reveal_answers, updated_at")
         .eq("id", 1)
@@ -132,6 +148,7 @@ def _finalize_round_if_needed(client):
         .execute()
         .data
     )
+    return _with_phase(final_state)
 
 
 @router.get("/quiz/state")
@@ -147,6 +164,7 @@ def get_quiz_state():
             .execute()
             .data
         )
+        state = _with_phase(state)
     if not state:
         raise HTTPException(status_code=500, detail="Game state missing")
 
@@ -195,10 +213,25 @@ def submit_answer(body: SubmitAnswerBody):
         .execute()
         .data
     )
+
+    # Re-check expiration against parsed datetime to avoid string/clock edge cases.
+    ends_at = _parse_iso_datetime((state or {}).get("round_ends_at"))
+    if state and ends_at and datetime.now(timezone.utc) >= ends_at:
+        _finalize_round_if_needed(client)
+        state = (
+            client.table("game_state")
+            .select("id, is_active, current_question_id, round_ends_at")
+            .eq("id", 1)
+            .maybe_single()
+            .execute()
+            .data
+        )
+
     if not state or not state.get("is_active") or not state.get("current_question_id"):
         raise HTTPException(status_code=409, detail="No active question")
 
-    if state.get("round_ends_at") and _now_iso() > state["round_ends_at"]:
+    ends_at = _parse_iso_datetime(state.get("round_ends_at"))
+    if ends_at and datetime.now(timezone.utc) >= ends_at:
         raise HTTPException(status_code=409, detail="Answer window is closed")
 
     existing_rows = (

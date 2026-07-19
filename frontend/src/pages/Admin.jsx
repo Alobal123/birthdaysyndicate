@@ -1,11 +1,15 @@
-import { useState } from "react";
-import { adminDelete, adminGet, adminPost } from "../lib/api";
+import { useEffect, useMemo, useState } from "react";
+import { adminDelete, adminGet, adminPost, getQuizState } from "../lib/api";
+import { supabase } from "../lib/supabase";
+
+const ADMIN_TOKEN_KEY = "pub_quiz_admin_token";
 
 export default function AdminPage() {
-  const [token, setToken] = useState("");
+  const [token, setToken] = useState(localStorage.getItem(ADMIN_TOKEN_KEY) || "");
   const [players, setPlayers] = useState([]);
   const [questions, setQuestions] = useState([]);
   const [answers, setAnswers] = useState([]);
+  const [quizState, setQuizState] = useState(null);
   const [durationSeconds, setDurationSeconds] = useState(30);
   const [selectedQuestionId, setSelectedQuestionId] = useState("");
   const [draft, setDraft] = useState({
@@ -19,16 +23,112 @@ export default function AdminPage() {
   });
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(false);
 
   const run = async (fn) => {
     setError("");
     setMessage("");
     try {
       await fn();
+      await loadAdminData(token);
     } catch (err) {
       setError(err.message || "Admin request failed");
     }
   };
+
+  const loadAdminData = async (authToken) => {
+    if (!authToken) {
+      setPlayers([]);
+      setQuestions([]);
+      setAnswers([]);
+      setQuizState(null);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const [playersData, questionsData, answersData, stateData] = await Promise.all([
+        adminGet("/players", authToken),
+        adminGet("/questions", authToken),
+        adminGet("/answers/current", authToken),
+        getQuizState(),
+      ]);
+
+      setPlayers(playersData.players || []);
+      const loadedQuestions = questionsData.questions || [];
+      setQuestions(loadedQuestions);
+      if (!selectedQuestionId && loadedQuestions.length) {
+        setSelectedQuestionId(loadedQuestions[0].id);
+      }
+      setAnswers(answersData.answers || []);
+      setQuizState(stateData.state || null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    localStorage.setItem(ADMIN_TOKEN_KEY, token);
+    let alive = true;
+
+    const refresh = async () => {
+      try {
+        await loadAdminData(token);
+      } catch (err) {
+        if (alive) {
+          setError(err.message || "Failed to load admin data");
+        }
+      }
+    };
+
+    refresh();
+
+    const pollTimer = window.setInterval(refresh, 3000);
+
+    if (!token) {
+      return () => {
+        alive = false;
+        window.clearInterval(pollTimer);
+      };
+    }
+
+    const channel = supabase
+      .channel("admin-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "players" }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "quiz_questions" }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "player_answers" }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "game_state" }, refresh)
+      .subscribe();
+
+    return () => {
+      alive = false;
+      window.clearInterval(pollTimer);
+      supabase.removeChannel(channel);
+    };
+  }, [token]);
+
+  const phase = useMemo(() => {
+    if (quizState?.phase) {
+      return quizState.phase;
+    }
+    if (!quizState?.current_question_id) {
+      return "IDLE";
+    }
+    if (quizState?.is_active) {
+      return "OPEN";
+    }
+    if (quizState?.reveal_answers) {
+      return "REVEAL";
+    }
+    return "CLOSED";
+  }, [quizState]);
+
+  const phaseLabelClass = useMemo(() => {
+    if (phase === "OPEN") return "text-mint";
+    if (phase === "REVEAL") return "text-ember";
+    if (phase === "CLOSED") return "text-ink";
+    return "text-steel";
+  }, [phase]);
 
   const validateQuestionDraft = () => {
     const prompt = draft.prompt.trim();
@@ -67,46 +167,34 @@ export default function AdminPage() {
           placeholder="Admin bearer token"
         />
 
+        <div className="mt-4 rounded-xl border border-ink/10 bg-white p-4">
+          <p className="text-xs uppercase tracking-[0.22em] text-steel">Round Status</p>
+          <p className={`mt-1 font-display text-2xl ${phaseLabelClass}`}>{phase}</p>
+          <p className="mt-1 text-sm text-steel">{loading ? "Syncing..." : `${players.length} players • ${answers.length} answers`}</p>
+        </div>
+
         <div className="mt-5 flex flex-wrap gap-2">
           <button className="btn-primary" onClick={() => run(async () => {
-            await adminPost("/game/start", token);
-            setMessage("Game started");
-          })}>Start Game</button>
-          <button className="btn-ghost" onClick={() => run(async () => {
-            await adminPost("/game/stop", token);
-            setMessage("Game stopped");
-          })}>Stop Game</button>
+            if (phase === "OPEN") {
+              await adminPost("/questions/reveal", token, { reveal: true });
+              setMessage("Round ended and answers revealed");
+              return;
+            }
+
+            if (!selectedQuestionId) {
+              throw new Error("Pick a question first");
+            }
+            await adminPost("/questions/activate", token, { question_id: selectedQuestionId, duration_seconds: durationSeconds });
+            setMessage("Round started");
+          })}>
+            {phase === "OPEN" ? "End & Reveal Round" : "Start Round"}
+          </button>
           <button className="btn-ghost" onClick={() => run(async () => {
             await adminPost("/game/reset", token);
             setMessage("Scores and answers reset");
           })}>Reset Scores</button>
           <button className="btn-ghost" onClick={() => run(async () => {
-            const data = await adminGet("/players", token);
-            setPlayers(data.players || []);
-            setMessage("Players loaded");
-          })}>Load Players</button>
-          <button className="btn-ghost" onClick={() => run(async () => {
-            const data = await adminGet("/questions", token);
-            const loaded = data.questions || [];
-            setQuestions(loaded);
-            if (!selectedQuestionId && loaded.length) {
-              setSelectedQuestionId(loaded[0].id);
-            }
-            setMessage("Questions loaded");
-          })}>Load Questions</button>
-          <button className="btn-ghost" onClick={() => run(async () => {
-            const data = await adminGet("/answers/current", token);
-            setAnswers(data.answers || []);
-            setMessage("Answers loaded");
-          })}>Load Current Answers</button>
-          <button className="btn-ghost" onClick={() => run(async () => {
             await adminPost("/questions/seed", token);
-            const data = await adminGet("/questions", token);
-            const loaded = data.questions || [];
-            setQuestions(loaded);
-            if (!selectedQuestionId && loaded.length) {
-              setSelectedQuestionId(loaded[0].id);
-            }
             setMessage("Sample questions ready");
           })}>Seed Questions</button>
         </div>
@@ -182,9 +270,9 @@ export default function AdminPage() {
           </div>
         </div>
 
-        <div className="mt-6 grid gap-3 rounded-xl border border-ink/10 bg-white p-4 sm:grid-cols-[1fr_120px_auto_auto] sm:items-end">
+        <div className="mt-6 grid gap-3 rounded-xl border border-ink/10 bg-white p-4 sm:grid-cols-[1fr_120px] sm:items-end">
           <div>
-            <label className="text-sm font-semibold text-ink">Question To Activate</label>
+            <label className="text-sm font-semibold text-ink">Question For Next Round</label>
             <select className="mt-1 w-full" value={selectedQuestionId} onChange={(e) => setSelectedQuestionId(e.target.value)}>
               <option value="">Select a question</option>
               {questions.map((q) => (
@@ -203,17 +291,6 @@ export default function AdminPage() {
               onChange={(e) => setDurationSeconds(Number(e.target.value || 30))}
             />
           </div>
-          <button className="btn-primary" onClick={() => run(async () => {
-            if (!selectedQuestionId) {
-              throw new Error("Pick a question first");
-            }
-            await adminPost("/questions/activate", token, { question_id: selectedQuestionId, duration_seconds: durationSeconds });
-            setMessage("Question activated");
-          })}>Activate Round</button>
-          <button className="btn-ghost" onClick={() => run(async () => {
-            await adminPost("/questions/reveal", token, { reveal: true });
-            setMessage("Answers revealed");
-          })}>Reveal Answer</button>
         </div>
 
         {message ? <p className="mt-4 text-sm text-mint">{message}</p> : null}

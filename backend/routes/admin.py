@@ -5,9 +5,97 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from database import get_admin_secret, get_supabase
-from models import RevealAnswersBody
+from engine import PubQuizEngine
+from models import RoundPhase
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+engine = PubQuizEngine(points_for_correct=10)
+
+
+def _derive_round_phase(state: dict | None) -> str:
+    if not state or not state.get("current_question_id"):
+        return RoundPhase.IDLE.value
+    if state.get("is_active"):
+        return RoundPhase.OPEN.value
+    if state.get("reveal_answers"):
+        return RoundPhase.REVEAL.value
+    return RoundPhase.CLOSED.value
+
+
+def _get_state_with_phase(client):
+    state = (
+        client.table("game_state")
+        .select("id, is_active, current_question_id, round_started_at, round_ends_at, reveal_answers, updated_at")
+        .eq("id", 1)
+        .maybe_single()
+        .execute()
+        .data
+    )
+    if state:
+        state["phase"] = _derive_round_phase(state)
+    return state
+
+
+def _fetch_player_score(client, player_id: str):
+    return (
+        client.table("players")
+        .select("id, score")
+        .eq("id", player_id)
+        .maybe_single()
+        .execute()
+        .data
+    )
+
+
+def _finalize_question_scores(client, question_id: str):
+    question = (
+        client.table("quiz_questions")
+        .select("id, correct_option")
+        .eq("id", question_id)
+        .maybe_single()
+        .execute()
+        .data
+    )
+    if not question:
+        return
+
+    answers = (
+        client.table("player_answers")
+        .select("id, player_id, selected_option, is_correct, points_awarded")
+        .eq("question_id", question_id)
+        .execute()
+        .data
+        or []
+    )
+
+    for answer in answers:
+        score = engine.score_answer(answer["selected_option"], question["correct_option"])
+        target_is_correct = score["is_correct"]
+        target_points = score["points_awarded"]
+
+        already_scored = (
+            bool(answer.get("is_correct")) == target_is_correct
+            and int(answer.get("points_awarded") or 0) == target_points
+        )
+        if already_scored:
+            continue
+
+        (
+            client.table("player_answers")
+            .update({"is_correct": target_is_correct, "points_awarded": target_points})
+            .eq("id", answer["id"])
+            .execute()
+        )
+
+        if target_points > 0:
+            player = _fetch_player_score(client, answer["player_id"])
+            if player:
+                (
+                    client.table("players")
+                    .update({"score": int(player["score"] or 0) + target_points})
+                    .eq("id", answer["player_id"])
+                    .execute()
+                )
 
 
 def require_admin(authorization: Optional[str] = Header(default=None)):
@@ -32,7 +120,7 @@ def start_game():
         .upsert({"id": 1, "is_active": True, "updated_at": now})
         .execute()
     )
-    return res.data[0] if res.data else {"ok": True}
+    return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.post("/game/stop", dependencies=[Depends(require_admin)])
@@ -45,7 +133,7 @@ def stop_game():
         .eq("id", 1)
         .execute()
     )
-    return res.data[0] if res.data else {"ok": True}
+    return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.post("/game/reset", dependencies=[Depends(require_admin)])
@@ -71,7 +159,7 @@ def reset_game():
         )
         .execute()
     )
-    return res.data[0] if res.data else {"ok": True}
+    return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.get("/players", dependencies=[Depends(require_admin)])
@@ -208,7 +296,7 @@ async def activate_question(request: Request):
         )
         .execute()
     )
-    return res.data[0] if res.data else {"ok": True}
+    return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.post("/questions/reveal", dependencies=[Depends(require_admin)])
@@ -230,13 +318,40 @@ async def reveal_answers(request: Request):
             reveal = bool(reveal_raw)
 
     now = datetime.now(timezone.utc).isoformat()
-    res = (
-        client.table("game_state")
-        .update({"reveal_answers": reveal, "updated_at": now})
-        .eq("id", 1)
-        .execute()
-    )
-    return res.data[0] if res.data else {"ok": True}
+
+    if reveal:
+        state = (
+            client.table("game_state")
+            .select("current_question_id")
+            .eq("id", 1)
+            .maybe_single()
+            .execute()
+            .data
+        )
+        question_id = (state or {}).get("current_question_id")
+        if question_id:
+            _finalize_question_scores(client, question_id)
+
+        res = (
+            client.table("game_state")
+            .update({
+                "reveal_answers": True,
+                "is_active": False,
+                "round_ends_at": now,
+                "updated_at": now,
+            })
+            .eq("id", 1)
+            .execute()
+        )
+    else:
+        res = (
+            client.table("game_state")
+            .update({"reveal_answers": False, "updated_at": now})
+            .eq("id", 1)
+            .execute()
+        )
+
+    return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.post("/questions/seed", dependencies=[Depends(require_admin)])

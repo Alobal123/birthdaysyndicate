@@ -11,6 +11,13 @@ class AnswerOption(str, Enum):
     D = "D"
 
 
+class RoundPhase(str, Enum):
+    IDLE = "IDLE"
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
+    REVEAL = "REVEAL"
+
+
 class CreatePlayerBody(BaseModel):
     name: str = Field(min_length=1, max_length=60)
 

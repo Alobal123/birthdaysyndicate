@@ -10,6 +10,8 @@ router = APIRouter(prefix="/api", tags=["players"])
 def create_player(body: CreatePlayerBody):
     client = get_supabase()
     normalized_name = body.name.strip()
+    if not normalized_name:
+        raise HTTPException(status_code=400, detail="Player name cannot be empty")
 
     existing = (
         client.table("players")

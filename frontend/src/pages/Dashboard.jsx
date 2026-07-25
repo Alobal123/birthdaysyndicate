@@ -1,89 +1,169 @@
-import { useEffect, useRef, useState } from "react";
-import { getPlayer, getPlayerAnswer, getQuizState, submitAnswer } from "../lib/api";
-import { loadPlayerSession } from "../lib/session";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { getLeaderboard, getPlayer, getPlayerAnswer, getQuizState, submitAnswer } from "../lib/api";
+import { clearPlayerSession, loadPlayerSession } from "../lib/session";
 import { supabase } from "../lib/supabase";
 
 const ANSWER_OPTIONS = ["A", "B", "C", "D"];
+const DASHBOARD_REFRESH_MS = 1000;
+
+function derivePhase(state) {
+  if (state?.phase) {
+    return String(state.phase).toUpperCase();
+  }
+  if (!state?.current_question_id) {
+    return "IDLE";
+  }
+  if (state?.is_active) {
+    return "OPEN";
+  }
+  if (state?.reveal_answers) {
+    return "REVEAL";
+  }
+  return "CLOSED";
+}
+
+function localizeErrorMessage(message) {
+  const normalized = String(message || "").trim();
+  if (!normalized) {
+    return "Došlo k chybě.";
+  }
+
+  if (normalized === "Player not found") {
+    return "Hráč nebyl nalezen.";
+  }
+  if (normalized === "No active question") {
+    return "Momentálně není aktivní otázka.";
+  }
+  if (normalized === "Answer window is closed") {
+    return "Čas na odpověď už vypršel.";
+  }
+  if (normalized === "Failed to load quiz state") {
+    return "Nepodařilo se načíst stav kola.";
+  }
+  if (normalized === "Failed to save answer") {
+    return "Nepodařilo se uložit odpověď.";
+  }
+
+  return "Došlo k chybě.";
+}
 
 export default function DashboardPage() {
+  const navigate = useNavigate();
   const session = loadPlayerSession();
+  const sessionId = session?.id || null;
+  const sessionName = session?.name || "";
+
   const [player, setPlayer] = useState(session || null);
-  const [quizState, setQuizState] = useState(null);
-  const [question, setQuestion] = useState(null);
-  const [selected, setSelected] = useState("A");
-  const [myAnswer, setMyAnswer] = useState(null);
+  // Single atomic snapshot so state, question, and the player's answer are
+  // always rendered together. This is what makes the UI refresh-robust.
+  const [snapshot, setSnapshot] = useState(null);
+  const [leaderboard, setLeaderboard] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [selected, setSelected] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [countdownSeconds, setCountdownSeconds] = useState(0);
-  const loadRequestRef = useRef(0);
-  const lastQuestionIdRef = useRef(null);
 
-  const resetTransientRoundState = () => {
-    setQuizState(null);
-    setQuestion(null);
-    setMyAnswer(null);
-    setBusy(false);
-    setSelected("A");
-    setCountdownSeconds(0);
-    setError("");
-  };
+  const loadRequestRef = useRef(0);
+  const loadInFlightRef = useRef(false);
+  const selectedResetForRef = useRef(null);
+  const submittedForQuestionRef = useRef(null);
+  const previousPhaseRef = useRef(null);
 
   useEffect(() => {
-    if (!session) {
+    if (!sessionId) {
       return;
     }
 
     let alive = true;
 
     const loadAll = async () => {
+      if (loadInFlightRef.current) {
+        return;
+      }
+      loadInFlightRef.current = true;
       const requestId = ++loadRequestRef.current;
       try {
-        const [p, quiz] = await Promise.all([getPlayer(session.id), getQuizState()]);
-        if (alive && requestId === loadRequestRef.current) {
-          setPlayer(p);
-          setQuizState(quiz.state || null);
-          setQuestion(quiz.question || null);
+        const [playerData, quiz] = await Promise.all([getPlayer(sessionId), getQuizState()]);
+
+        const state = quiz.state || null;
+        const question = quiz.question || null;
+        const phase = derivePhase(state);
+        const questionId = state?.current_question_id ?? question?.id ?? null;
+        const gameOver = Boolean(state?.game_over);
+
+        let myAnswer = null;
+        if (questionId && !gameOver) {
+          try {
+            const answerData = await getPlayerAnswer(questionId, sessionId);
+            myAnswer = answerData.answer || null;
+          } catch {
+            // Keep rendering the question even if answer lookup fails transiently.
+            myAnswer = null;
+          }
         }
 
-        const currentQuestionId = quiz.state?.current_question_id || null;
-        if (!currentQuestionId) {
-          if (alive && requestId === loadRequestRef.current) {
-            setMyAnswer(null);
+        let leaderboardPlayers = [];
+        if (gameOver) {
+          try {
+            const board = await getLeaderboard();
+            leaderboardPlayers = board?.players || [];
+          } catch {
+            leaderboardPlayers = [];
           }
+        }
+
+        if (!alive || requestId !== loadRequestRef.current) {
           return;
         }
 
-        const answerData = await getPlayerAnswer(currentQuestionId, session.id);
-        if (alive && requestId === loadRequestRef.current) {
-          setMyAnswer(answerData.answer || null);
-        }
+        setPlayer(playerData);
+        setLeaderboard(leaderboardPlayers);
+        setSnapshot((prev) => {
+          // If backend is in reveal mode but briefly omits question payload,
+          // keep the last known question to avoid "No active question" flicker.
+          const effectiveQuestion = phase === "REVEAL" && !question ? (prev?.question || null) : question;
+          const effectiveQuestionId = questionId ?? (phase === "REVEAL" ? (prev?.questionId || null) : null);
+          return { state, question: effectiveQuestion, questionId: effectiveQuestionId, myAnswer };
+        });
+        setLoaded(true);
+        setError("");
       } catch (err) {
-        if (alive && requestId === loadRequestRef.current) {
-          setError(err.message || "Failed to load quiz state");
+        if (!alive || requestId !== loadRequestRef.current) {
+          return;
+        }
+        if ((err?.message || "") === "Player not found") {
+          clearPlayerSession();
+          navigate("/", { replace: true });
+          return;
+        }
+        setError(localizeErrorMessage(err.message || "Failed to load quiz state"));
+      } finally {
+        if (requestId === loadRequestRef.current) {
+          loadInFlightRef.current = false;
+        } else {
+          loadInFlightRef.current = false;
         }
       }
     };
 
-    resetTransientRoundState();
     loadAll();
 
-    const refreshTimer = window.setInterval(loadAll, 5000);
+    const refreshTimer = window.setInterval(loadAll, DASHBOARD_REFRESH_MS);
 
-    const onPageShow = (event) => {
-      if (!event.persisted) {
-        return;
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        loadAll();
       }
-      resetTransientRoundState();
-      loadAll();
     };
-
-    window.addEventListener("pageshow", onPageShow);
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     const channel = supabase
-      .channel(`quiz-dashboard-${session.id}`)
+      .channel(`quiz-dashboard-${sessionId}`)
       .on(
         "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "players", filter: `id=eq.${session.id}` },
+        { event: "UPDATE", schema: "public", table: "players", filter: `id=eq.${sessionId}` },
         (payload) => setPlayer(payload.new)
       )
       .on("postgres_changes", { event: "*", schema: "public", table: "game_state" }, loadAll)
@@ -93,31 +173,38 @@ export default function DashboardPage() {
     return () => {
       alive = false;
       window.clearInterval(refreshTimer);
-      window.removeEventListener("pageshow", onPageShow);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       supabase.removeChannel(channel);
     };
-  }, [session]);
+  }, [sessionId, navigate]);
 
+  const state = snapshot?.state || null;
+  const question = snapshot?.question || null;
+  const questionId = snapshot?.questionId || null;
+  const myAnswer = snapshot?.myAnswer || null;
+  const phase = derivePhase(state);
+  const isGameOver = Boolean(state?.game_over);
+
+  // Reset the pending selection whenever the active question changes.
   useEffect(() => {
-    const currentQuestionId = quizState?.current_question_id || null;
-    if (lastQuestionIdRef.current !== currentQuestionId) {
-      lastQuestionIdRef.current = currentQuestionId;
-      setMyAnswer(null);
+    if (selectedResetForRef.current !== questionId) {
+      selectedResetForRef.current = questionId;
+      setSelected(myAnswer?.selected_option || null);
       setBusy(false);
-      setSelected("A");
+      submittedForQuestionRef.current = null;
     }
-  }, [quizState?.current_question_id]);
+  }, [questionId, myAnswer?.selected_option]);
 
+  // Countdown is only meaningful while the round is OPEN.
   useEffect(() => {
-    if (!quizState?.is_active || !quizState?.round_ends_at) {
+    if (phase !== "OPEN" || !state?.round_ends_at) {
       setCountdownSeconds(0);
       return;
     }
 
     const getRemaining = () => {
-      const end = new Date(quizState.round_ends_at).getTime();
-      const now = Date.now();
-      return Math.max(0, Math.ceil((end - now) / 1000));
+      const end = new Date(state.round_ends_at).getTime();
+      return Math.max(0, Math.ceil((end - Date.now()) / 1000));
     };
 
     setCountdownSeconds(getRemaining());
@@ -128,36 +215,7 @@ export default function DashboardPage() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [quizState?.is_active, quizState?.round_ends_at]);
-
-  useEffect(() => {
-    if (countdownSeconds !== 0 || !quizState?.is_active || !quizState?.current_question_id) {
-      return;
-    }
-
-    let alive = true;
-
-    const finalizeAndRefresh = async () => {
-      try {
-        const quiz = await getQuizState();
-        if (!alive) {
-          return;
-        }
-        setQuizState(quiz.state || null);
-        setQuestion(quiz.question || null);
-      } catch (err) {
-        if (alive) {
-          setError(err.message || "Failed to refresh quiz state");
-        }
-      }
-    };
-
-    finalizeAndRefresh();
-
-    return () => {
-      alive = false;
-    };
-  }, [countdownSeconds, quizState?.current_question_id, quizState?.is_active]);
+  }, [phase, state?.round_ends_at]);
 
   const formatCountdown = (value) => {
     const safe = Math.max(0, value || 0);
@@ -166,53 +224,142 @@ export default function DashboardPage() {
     return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   };
 
-  const onSubmit = async () => {
-    if (!session?.id || !quizState?.current_question_id || !quizState?.is_active || countdownSeconds <= 0 || myAnswer || busy) {
+  const submitCurrentSelection = useCallback(async (targetQuestionId, selectedOption) => {
+    if (!sessionId || !targetQuestionId || !selectedOption) {
+      return;
+    }
+    if (submittedForQuestionRef.current === targetQuestionId) {
       return;
     }
 
-    const submittingQuestionId = quizState.current_question_id;
     setBusy(true);
-    setError("");
     try {
-      const result = await submitAnswer(session.id, selected);
-      if (quizState?.current_question_id === submittingQuestionId) {
-        setMyAnswer(result.answer || null);
-      }
-      const p = await getPlayer(session.id);
-      setPlayer(p);
+      const result = await submitAnswer(sessionId, selectedOption);
+      submittedForQuestionRef.current = targetQuestionId;
+      setSnapshot((prev) => {
+        if (!prev || prev.questionId !== targetQuestionId) {
+          return prev;
+        }
+        return { ...prev, myAnswer: result.answer || prev.myAnswer };
+      });
     } catch (err) {
-      setError(err.message || "Failed to submit answer");
+      const message = err?.message || "";
+      if (message === "Player not found") {
+        clearPlayerSession();
+        navigate("/", { replace: true });
+        return;
+      }
+      // If round ended before this request arrived, avoid noisy UI errors.
+      if (message === "No active question" || message === "Answer window is closed") {
+        return;
+      }
+      setError(localizeErrorMessage(message || "Failed to save answer"));
     } finally {
       setBusy(false);
     }
-  };
+  }, [sessionId, navigate]);
+
+  useEffect(() => {
+    if (!sessionId || !questionId || phase !== "OPEN" || isGameOver || !state?.round_ends_at || !selected) {
+      return;
+    }
+
+    if (myAnswer?.selected_option === selected || submittedForQuestionRef.current === questionId) {
+      return;
+    }
+
+    const submittingQuestionId = questionId;
+    const selectedOption = selected;
+    const msRemaining = new Date(state.round_ends_at).getTime() - Date.now();
+    const delayMs = Math.max(0, msRemaining);
+
+    const timer = window.setTimeout(() => {
+      submitCurrentSelection(submittingQuestionId, selectedOption);
+    }, delayMs);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [sessionId, questionId, phase, isGameOver, state?.round_ends_at, selected, myAnswer?.selected_option, submitCurrentSelection]);
+
+  useEffect(() => {
+    const previousPhase = previousPhaseRef.current;
+    previousPhaseRef.current = phase;
+
+    if (
+      previousPhase === "OPEN" &&
+      phase !== "OPEN" &&
+      !isGameOver &&
+      questionId &&
+      selected &&
+      !myAnswer &&
+      submittedForQuestionRef.current !== questionId
+    ) {
+      submitCurrentSelection(questionId, selected);
+    }
+  }, [phase, isGameOver, questionId, selected, myAnswer, submitCurrentSelection]);
 
   if (!session) {
     return null;
   }
 
-  const phase = quizState?.phase || (quizState?.is_active ? "OPEN" : quizState?.reveal_answers ? "REVEAL" : "IDLE");
-  const birthdayAnswer = phase === "REVEAL" ? (quizState?.special_player_answer || null) : null;
-  const benchmarkOption = phase === "REVEAL" ? (question?.correct_option || null) : null;
-  const revealMode = Boolean(phase === "REVEAL");
-  const showQuestion = Boolean(question && (phase === "OPEN" || phase === "REVEAL"));
+  const revealMode = phase === "REVEAL";
+  const birthdayAnswer = revealMode ? (state?.special_player_answer || null) : null;
+  const benchmarkOption = revealMode ? (question?.correct_option || null) : null;
+  const hasQuestion = Boolean(question);
+  const showQuestion = hasQuestion && phase !== "IDLE";
+  const canSelect = phase === "OPEN" && countdownSeconds > 0;
 
   return (
     <main className="mx-auto max-w-3xl p-3 sm:p-4 md:p-8">
       <section className="panel p-4 sm:p-5 md:p-6 animate-riseIn">
         <div className="flex items-start justify-between gap-3">
           <p className="font-display text-5xl sm:text-6xl leading-none text-ink">{player?.score ?? 0}</p>
-          <p className="max-w-[52%] text-right font-display text-xl sm:text-2xl leading-tight text-ink break-words">{player?.name || session.name}</p>
+          <p className="max-w-[52%] text-right font-display text-xl sm:text-2xl leading-tight text-ink break-words">{player?.name || sessionName}</p>
         </div>
 
         <div className="mt-5 rounded-2xl border border-ink/10 bg-white p-4 sm:p-5">
-          {!showQuestion ? (
-            <p className="text-base text-steel">No active question.</p>
+          {!loaded ? (
+            <p className="text-base text-steel">Načítání...</p>
+          ) : isGameOver ? (
+            <>
+              <p className="mb-3 text-sm font-semibold uppercase tracking-[0.18em] text-steel">Konečné pořadí</p>
+              <ul className="space-y-3">
+                {leaderboard.map((entry, index) => {
+                  const rank = index + 1;
+                  const isTop3 = rank <= 3;
+                  const rankTone =
+                    rank === 1
+                      ? "border-amber-400 bg-amber-50"
+                      : rank === 2
+                        ? "border-slate-300 bg-slate-50"
+                        : rank === 3
+                          ? "border-orange-300 bg-orange-50"
+                          : "border-ink/10 bg-white";
+
+                  return (
+                    <li
+                      key={entry.id}
+                      className={`rounded-xl border px-4 py-3 ${rankTone} ${isTop3 ? "text-lg sm:text-xl font-semibold" : "text-base"}`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="truncate">{rank}. {entry.name}</span>
+                        <span className="font-display text-xl sm:text-2xl">{entry.score}</span>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
+          ) : !showQuestion ? (
+            <p className="text-base text-steel">Momentálně není aktivní otázka.</p>
           ) : (
             <>
               {phase === "OPEN" ? (
                 <p className="mb-2 font-display text-2xl text-ink">{formatCountdown(countdownSeconds)}</p>
+              ) : null}
+              {phase === "CLOSED" ? (
+                <p className="mb-2 text-sm text-steel">Kolo je uzavřené. Čeká se na další krok moderátora.</p>
               ) : null}
               <p className="text-xl sm:text-2xl font-semibold leading-snug text-ink">{question.prompt}</p>
 
@@ -230,9 +377,9 @@ export default function DashboardPage() {
                     stateClass = "border-mint bg-mint/20 text-ink";
                   } else if (isWrongLockedOption) {
                     stateClass = "border-pink-400 bg-pink-100 text-ink";
-                  } else if (myAnswer && isLockedChoice) {
+                  } else if (canSelect && isSelected) {
                     stateClass = "border-ink bg-ink text-white";
-                  } else if (!myAnswer && isSelected) {
+                  } else if (myAnswer && isLockedChoice) {
                     stateClass = "border-ink bg-ink text-white";
                   }
 
@@ -242,27 +389,16 @@ export default function DashboardPage() {
                       type="button"
                       className={`min-h-14 rounded-xl border px-4 py-3 text-left text-base leading-snug transition ${stateClass}`}
                       onClick={() => setSelected(optionKey)}
-                      disabled={!!myAnswer || busy}
+                      disabled={!canSelect}
                     >
                       <span className="font-semibold mr-1">{optionKey}.</span>
                       <span>{optionLabel}</span>
-                      {isBirthdayOption ? <span className="ml-2" aria-label="birthday answer">🎉</span> : null}
+                      {isBirthdayOption ? <span className="ml-2" aria-label="narozeninová odpověď">🎉</span> : null}
                     </button>
                   );
                 })}
               </div>
 
-              {!myAnswer ? (
-                <div className="mt-5">
-                  <button
-                    className="btn-accent w-full sm:w-auto min-h-12 px-6 text-base"
-                    onClick={onSubmit}
-                    disabled={phase !== "OPEN" || countdownSeconds <= 0 || busy}
-                  >
-                    {busy ? "Submitting..." : "Lock In"}
-                  </button>
-                </div>
-              ) : null}
             </>
           )}
           {error ? <p className="mt-4 text-sm sm:text-base text-ember">{error}</p> : null}

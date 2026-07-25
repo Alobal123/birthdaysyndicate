@@ -32,6 +32,7 @@ create table if not exists quiz_questions (
 create table if not exists game_state (
     id int primary key default 1,
     is_active boolean not null default false,
+    game_over boolean not null default false,
     current_question_id uuid references quiz_questions(id) on delete set null,
     special_player_id uuid references players(id) on delete set null,
     round_started_at timestamptz,
@@ -40,6 +41,8 @@ create table if not exists game_state (
     updated_at timestamptz not null default now(),
     constraint single_game_state_row check (id = 1)
 );
+
+alter table game_state add column if not exists game_over boolean not null default false;
 
 insert into game_state (id, is_active)
 values (1, false)

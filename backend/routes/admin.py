@@ -21,6 +21,52 @@ def _response_data_list(response) -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
+def _get_game_state(client):
+    try:
+        state = _response_data_dict(
+            client.table("game_state")
+            .select("id, is_active, game_over, current_question_id, special_player_id, round_started_at, round_ends_at, reveal_answers, updated_at")
+            .eq("id", 1)
+            .maybe_single()
+            .execute()
+        )
+    except Exception:
+        state = _response_data_dict(
+            client.table("game_state")
+            .select("id, is_active, current_question_id, special_player_id, round_started_at, round_ends_at, reveal_answers, updated_at")
+            .eq("id", 1)
+            .maybe_single()
+            .execute()
+        )
+        if state is not None:
+            state["game_over"] = False
+        return state
+
+    if state is not None and "game_over" not in state:
+        state["game_over"] = False
+    return state
+
+
+def _upsert_game_state(client, payload: dict[str, Any]):
+    try:
+        return client.table("game_state").upsert(payload).execute()
+    except Exception:
+        if "game_over" not in payload:
+            raise
+        fallback_payload = {k: v for k, v in payload.items() if k != "game_over"}
+        return client.table("game_state").upsert(fallback_payload).execute()
+
+
+def _update_game_state(client, payload: dict[str, Any]):
+    try:
+        return client.table("game_state").update(payload).eq("id", 1).execute()
+    except Exception:
+        if "game_over" not in payload:
+            raise
+        fallback_payload = {k: v for k, v in payload.items() if k != "game_over"}
+        return client.table("game_state").update(fallback_payload).eq("id", 1).execute()
+
+
 def _derive_round_phase(state: dict | None) -> str:
     if not state or not state.get("current_question_id"):
         return RoundPhase.IDLE.value
@@ -32,13 +78,7 @@ def _derive_round_phase(state: dict | None) -> str:
 
 
 def _get_state_with_phase(client):
-    state = _response_data_dict(
-        client.table("game_state")
-        .select("id, is_active, current_question_id, special_player_id, round_started_at, round_ends_at, reveal_answers, updated_at")
-        .eq("id", 1)
-        .maybe_single()
-        .execute()
-    )
+    state = _get_game_state(client)
     if state:
         state["phase"] = _derive_round_phase(state)
     return state
@@ -52,6 +92,29 @@ def _fetch_player_score(client, player_id: str):
         .maybe_single()
         .execute()
     )
+
+
+def _rebuild_player_scores(client):
+    players = _response_data_list(client.table("players").select("id").execute())
+    answer_rows = _response_data_list(client.table("player_answers").select("player_id, points_awarded").execute())
+
+    totals: dict[str, int] = {}
+    for row in answer_rows:
+        player_id = row.get("player_id")
+        if not player_id:
+            continue
+        totals[player_id] = totals.get(player_id, 0) + int(row.get("points_awarded") or 0)
+
+    for player in players:
+        player_id = player.get("id")
+        if not player_id:
+            continue
+        (
+            client.table("players")
+            .update({"score": totals.get(player_id, 0)})
+            .eq("id", player_id)
+            .execute()
+        )
 
 
 def _fetch_player_answer(client, player_id: str, question_id: str):
@@ -94,6 +157,7 @@ def _finalize_question_scores(client, question_id: str, special_player_id: str |
         .execute()
     )
 
+    changed_any = False
     for answer in answers:
         score = engine.score_birthday_answer(
             answer["selected_option"],
@@ -103,13 +167,16 @@ def _finalize_question_scores(client, question_id: str, special_player_id: str |
         )
         target_is_correct = score["is_correct"]
         target_points = score["points_awarded"]
+        previous_points = int(answer.get("points_awarded") or 0)
 
         already_scored = (
             bool(answer.get("is_correct")) == target_is_correct
-            and int(answer.get("points_awarded") or 0) == target_points
+            and previous_points == target_points
         )
         if already_scored:
             continue
+
+        changed_any = True
 
         (
             client.table("player_answers")
@@ -118,15 +185,8 @@ def _finalize_question_scores(client, question_id: str, special_player_id: str |
             .execute()
         )
 
-        if target_points > 0:
-            player = _fetch_player_score(client, answer["player_id"])
-            if player:
-                (
-                    client.table("players")
-                    .update({"score": int(player["score"] or 0) + target_points})
-                    .eq("id", answer["player_id"])
-                    .execute()
-                )
+    if changed_any:
+        _rebuild_player_scores(client)
 
 
 def require_admin(authorization: Optional[str] = Header(default=None)):
@@ -146,11 +206,7 @@ def require_admin(authorization: Optional[str] = Header(default=None)):
 def start_game():
     client = get_supabase()
     now = datetime.now(timezone.utc).isoformat()
-    res = (
-        client.table("game_state")
-        .upsert({"id": 1, "is_active": True, "updated_at": now})
-        .execute()
-    )
+    res = _upsert_game_state(client, {"id": 1, "is_active": True, "game_over": False, "updated_at": now})
     return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
 
 
@@ -158,11 +214,38 @@ def start_game():
 def stop_game():
     client = get_supabase()
     now = datetime.now(timezone.utc).isoformat()
-    res = (
+    res = _update_game_state(client, {"is_active": False, "game_over": False, "updated_at": now})
+    return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
+
+
+@router.post("/game/end", dependencies=[Depends(require_admin)])
+def end_game():
+    client = get_supabase()
+    now = datetime.now(timezone.utc).isoformat()
+
+    state = _response_data_dict(
         client.table("game_state")
-        .update({"is_active": False, "updated_at": now})
+        .select("current_question_id, special_player_id")
         .eq("id", 1)
+        .maybe_single()
         .execute()
+    )
+    question_id = (state or {}).get("current_question_id")
+    if question_id:
+        _finalize_question_scores(client, question_id, (state or {}).get("special_player_id"))
+
+    res = _upsert_game_state(
+        client,
+        {
+            "id": 1,
+            "is_active": False,
+            "game_over": True,
+            "current_question_id": None,
+            "round_started_at": None,
+            "round_ends_at": None,
+            "reveal_answers": False,
+            "updated_at": now,
+        },
     )
     return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
 
@@ -175,20 +258,18 @@ def reset_game():
     client.table("players").update({"score": 0}).gte("score", -2147483648).execute()
     client.table("player_answers").delete().gte("points_awarded", 0).execute()
 
-    res = (
-        client.table("game_state")
-        .upsert(
-            {
-                "id": 1,
-                "is_active": False,
-                "current_question_id": None,
-                "round_started_at": None,
-                "round_ends_at": None,
-                "reveal_answers": False,
-                "updated_at": now,
-            }
-        )
-        .execute()
+    res = _upsert_game_state(
+        client,
+        {
+            "id": 1,
+            "is_active": False,
+            "game_over": False,
+            "current_question_id": None,
+            "round_started_at": None,
+            "round_ends_at": None,
+            "reveal_answers": False,
+            "updated_at": now,
+        },
     )
     return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
 
@@ -229,16 +310,13 @@ def set_special_player(body: SetSpecialPlayerBody):
         if not player:
             raise HTTPException(status_code=404, detail="Special player not found")
 
-    res = (
-        client.table("game_state")
-        .upsert(
-            {
-                "id": 1,
-                "special_player_id": special_player_id,
-                "updated_at": now,
-            }
-        )
-        .execute()
+    res = _upsert_game_state(
+        client,
+        {
+            "id": 1,
+            "special_player_id": special_player_id,
+            "updated_at": now,
+        },
     )
     return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
 
@@ -369,20 +447,18 @@ async def activate_question(request: Request):
 
     now = datetime.now(timezone.utc)
     ends_at = now + timedelta(seconds=duration_seconds)
-    res = (
-        client.table("game_state")
-        .upsert(
-            {
-                "id": 1,
-                "is_active": True,
-                "current_question_id": question_id,
-                "round_started_at": now.isoformat(),
-                "round_ends_at": ends_at.isoformat(),
-                "reveal_answers": False,
-                "updated_at": now.isoformat(),
-            }
-        )
-        .execute()
+    res = _upsert_game_state(
+        client,
+        {
+            "id": 1,
+            "is_active": True,
+            "game_over": False,
+            "current_question_id": question_id,
+            "round_started_at": now.isoformat(),
+            "round_ends_at": ends_at.isoformat(),
+            "reveal_answers": False,
+            "updated_at": now.isoformat(),
+        },
     )
     return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
 
@@ -416,27 +492,23 @@ async def reveal_answers(request: Request):
             .execute()
         )
         question_id = (state or {}).get("current_question_id")
-        if question_id:
-            _finalize_question_scores(client, question_id, (state or {}).get("special_player_id"))
+        if not question_id:
+            raise HTTPException(status_code=409, detail="Cannot reveal without an active question")
 
-        res = (
-            client.table("game_state")
-            .update({
+        _finalize_question_scores(client, question_id, (state or {}).get("special_player_id"))
+
+        res = _update_game_state(
+            client,
+            {
                 "reveal_answers": True,
                 "is_active": False,
+                "current_question_id": question_id,
                 "round_ends_at": now,
                 "updated_at": now,
-            })
-            .eq("id", 1)
-            .execute()
+            },
         )
     else:
-        res = (
-            client.table("game_state")
-            .update({"reveal_answers": False, "updated_at": now})
-            .eq("id", 1)
-            .execute()
-        )
+        res = _update_game_state(client, {"reveal_answers": False, "updated_at": now})
 
     return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
 

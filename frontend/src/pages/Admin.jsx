@@ -227,6 +227,10 @@ export default function AdminPage() {
             await adminPost("/game/reset", token);
             setMessage("Scores and answers reset");
           })}>Reset Scores</button>
+          <button className="btn-ghost" onClick={() => run(async () => {
+            await adminPost("/game/end", token);
+            setMessage("Game ended. Leaderboard is now visible to players.");
+          })}>End Game</button>
         </div>
 
         <div className="mt-6 grid gap-3 rounded-xl border border-ink/10 bg-white p-4 sm:grid-cols-[1fr_120px] sm:items-end">

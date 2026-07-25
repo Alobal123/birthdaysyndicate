@@ -63,10 +63,11 @@ function formatError(payload) {
 async function request(path, options = {}) {
   const url = `${API_BASE_URL}${path}`;
   const method = (options.method || "GET").toUpperCase();
+  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
   const headers = {
     ...(options.headers || {}),
   };
-  if (options.body !== undefined && !Object.keys(headers).some((key) => key.toLowerCase() === "content-type")) {
+  if (options.body !== undefined && !isFormData && !Object.keys(headers).some((key) => key.toLowerCase() === "content-type")) {
     headers["Content-Type"] = "application/json";
   }
 
@@ -140,5 +141,15 @@ export function adminDelete(path, token) {
   return request(`/api/admin${path}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export function adminUploadQuestionImage(questionId, token, file) {
+  const form = new FormData();
+  form.append("image", file);
+  return request(`/api/admin/questions/${questionId}/image`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
   });
 }

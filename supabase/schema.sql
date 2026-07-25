@@ -24,10 +24,13 @@ create table if not exists quiz_questions (
     option_b text not null,
     option_c text not null,
     option_d text not null,
+    image_url text,
     correct_option text check (correct_option in ('A', 'B', 'C', 'D')),
     duration_seconds int not null default 20,
     created_at timestamptz not null default now()
 );
+
+alter table quiz_questions add column if not exists image_url text;
 
 create table if not exists game_state (
     id int primary key default 1,

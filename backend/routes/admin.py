@@ -1,7 +1,10 @@
 from typing import Any, Optional
 from datetime import datetime, timedelta, timezone
+import os
+import re
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile
 
 from database import get_admin_secret, get_supabase
 from engine import PubQuizEngine
@@ -115,6 +118,25 @@ def _rebuild_player_scores(client):
             .eq("id", player_id)
             .execute()
         )
+
+
+def _question_image_bucket() -> str:
+    return os.getenv("SUPABASE_QUESTION_IMAGE_BUCKET", "question-clues").strip() or "question-clues"
+
+
+def _storage_public_url(client, bucket: str, path: str) -> str:
+    result = client.storage.from_(bucket).get_public_url(path)
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        if isinstance(result.get("data"), dict):
+            data_url = result["data"].get("publicUrl") or result["data"].get("publicURL")
+            if data_url:
+                return data_url
+        dict_url = result.get("publicUrl") or result.get("publicURL")
+        if dict_url:
+            return dict_url
+    raise HTTPException(status_code=500, detail="Failed to resolve image public URL")
 
 
 def _fetch_player_answer(client, player_id: str, question_id: str):
@@ -346,6 +368,8 @@ async def create_question(request: Request):
     option_d = (pick("option_d", "optionD") or "").strip()
     correct_option_raw = pick("correct_option", "correctOption")
     correct_option = (str(correct_option_raw).strip().upper() if correct_option_raw is not None else "")
+    image_url_raw = pick("image_url", "imageUrl")
+    image_url = (str(image_url_raw).strip() if image_url_raw is not None else "")
     duration_raw = pick("duration_seconds", "durationSeconds")
     try:
         duration_seconds = int(duration_raw if duration_raw is not None else 30)
@@ -368,6 +392,7 @@ async def create_question(request: Request):
         "option_c": option_c,
         "option_d": option_d,
         "correct_option": correct_option or None,
+        "image_url": image_url or None,
         "duration_seconds": duration_seconds,
     }
 
@@ -382,11 +407,153 @@ def list_questions():
     client = get_supabase()
     questions = _response_data_list(
         client.table("quiz_questions")
-        .select("id, prompt, option_a, option_b, option_c, option_d, correct_option, duration_seconds, created_at")
+        .select("id, prompt, option_a, option_b, option_c, option_d, correct_option, image_url, duration_seconds, created_at")
         .order("created_at", desc=True)
         .execute()
     )
     return {"questions": questions}
+
+
+@router.post("/questions/{question_id}/update", dependencies=[Depends(require_admin)])
+async def update_question(question_id: str, request: Request):
+    client = get_supabase()
+
+    existing = _response_data_dict(
+        client.table("quiz_questions")
+        .select("id, prompt, option_a, option_b, option_c, option_d, correct_option, image_url, duration_seconds")
+        .eq("id", question_id)
+        .maybe_single()
+        .execute()
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+
+    def pick(*keys: str):
+        for key in keys:
+            if key in body:
+                return body.get(key)
+        return None
+
+    prompt = (str(pick("prompt") if pick("prompt") is not None else existing.get("prompt") or "")).strip()
+    option_a = (str(pick("option_a", "optionA") if pick("option_a", "optionA") is not None else existing.get("option_a") or "")).strip()
+    option_b = (str(pick("option_b", "optionB") if pick("option_b", "optionB") is not None else existing.get("option_b") or "")).strip()
+    option_c = (str(pick("option_c", "optionC") if pick("option_c", "optionC") is not None else existing.get("option_c") or "")).strip()
+    option_d = (str(pick("option_d", "optionD") if pick("option_d", "optionD") is not None else existing.get("option_d") or "")).strip()
+
+    correct_option_raw = pick("correct_option", "correctOption")
+    if correct_option_raw is None:
+        correct_option = existing.get("correct_option")
+    else:
+        correct_option = str(correct_option_raw).strip().upper() or None
+
+    image_url_raw = pick("image_url", "imageUrl")
+    if image_url_raw is None:
+        image_url = existing.get("image_url")
+    else:
+        image_url = str(image_url_raw).strip() or None
+
+    duration_raw = pick("duration_seconds", "durationSeconds")
+    try:
+        duration_seconds = int(duration_raw if duration_raw is not None else (existing.get("duration_seconds") or 30))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="duration_seconds must be an integer")
+
+    if len(prompt) < 5:
+        raise HTTPException(status_code=400, detail="Prompt must be at least 5 characters")
+    if not option_a or not option_b or not option_c or not option_d:
+        raise HTTPException(status_code=400, detail="All options A-D are required")
+    if correct_option and correct_option not in {"A", "B", "C", "D"}:
+        raise HTTPException(status_code=400, detail="correct_option must be one of A, B, C, D")
+    if duration_seconds < 5 or duration_seconds > 600:
+        raise HTTPException(status_code=400, detail="duration_seconds must be between 5 and 600")
+
+    updated_rows = _response_data_list(
+        client.table("quiz_questions")
+        .update(
+            {
+                "prompt": prompt,
+                "option_a": option_a,
+                "option_b": option_b,
+                "option_c": option_c,
+                "option_d": option_d,
+                "correct_option": correct_option,
+                "image_url": image_url,
+                "duration_seconds": duration_seconds,
+            }
+        )
+        .eq("id", question_id)
+        .execute()
+    )
+    if not updated_rows:
+        raise HTTPException(status_code=500, detail="Question update failed")
+    return updated_rows[0]
+
+
+@router.post("/questions/{question_id}/image", dependencies=[Depends(require_admin)])
+async def upload_question_image(question_id: str, image: UploadFile = File(...)):
+    client = get_supabase()
+
+    question = _response_data_dict(
+        client.table("quiz_questions")
+        .select("id")
+        .eq("id", question_id)
+        .maybe_single()
+        .execute()
+    )
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    content_type = (image.content_type or "").lower()
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image files are allowed")
+
+    content = await image.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Image file is empty")
+    if len(content) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Image must be 8MB or smaller")
+
+    original_name = image.filename or "image"
+    extension_match = re.search(r"(\.[A-Za-z0-9]{1,8})$", original_name)
+    extension = extension_match.group(1).lower() if extension_match else ""
+    if not extension:
+        extension = ".jpg" if content_type in {"image/jpeg", "image/jpg"} else ".png"
+
+    bucket = _question_image_bucket()
+    object_path = f"questions/{question_id}/{uuid4().hex}{extension}"
+
+    try:
+        client.storage.from_(bucket).upload(
+            object_path,
+            content,
+            {"content-type": content_type, "upsert": "false"},
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Image upload failed. Ensure Storage bucket '{bucket}' exists and is writable.",
+        ) from exc
+
+    image_url = _storage_public_url(client, bucket, object_path)
+
+    updated_rows = _response_data_list(
+        client.table("quiz_questions")
+        .update({"image_url": image_url})
+        .eq("id", question_id)
+        .execute()
+    )
+    if not updated_rows:
+        raise HTTPException(status_code=500, detail="Failed to attach image to question")
+
+    return {"image_url": image_url, "object_path": object_path}
 
 
 @router.delete("/questions/{question_id}", dependencies=[Depends(require_admin)])

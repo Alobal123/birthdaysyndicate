@@ -363,6 +363,17 @@ export default function DashboardPage() {
               ) : null}
               <p className="text-xl sm:text-2xl font-semibold leading-snug text-ink">{question.prompt}</p>
 
+              {question.image_url ? (
+                <div className="mt-4 overflow-hidden rounded-xl border border-ink/10 bg-fog/40">
+                  <img
+                    src={question.image_url}
+                    alt="Nápověda k otázce"
+                    className="max-h-80 w-full object-contain"
+                    loading="lazy"
+                  />
+                </div>
+              ) : null}
+
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 {ANSWER_OPTIONS.map((optionKey) => {
                   const optionLabel = question[`option_${optionKey.toLowerCase()}`];

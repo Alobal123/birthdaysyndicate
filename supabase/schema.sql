@@ -25,8 +25,7 @@ create table if not exists quiz_questions (
     option_c text not null,
     option_d text not null,
     correct_option text check (correct_option in ('A', 'B', 'C', 'D')),
-    category text,
-    duration_seconds int not null default 30,
+    duration_seconds int not null default 20,
     created_at timestamptz not null default now()
 );
 

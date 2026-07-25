@@ -13,7 +13,7 @@ Replace the previous game logic with a simpler live pub-quiz format while keepin
 
 ## Entities
 - Player: name, score.
-- Quiz Question: prompt, 4 options, correct option, optional category.
+- Quiz Question: prompt, 4 options, correct option.
 - Game State: single global row for active round and current question.
 - Player Answer: one answer per player per question.
 
@@ -37,8 +37,7 @@ Replace the previous game logic with a simpler live pub-quiz format while keepin
 7. `GET /api/admin/questions`
 8. `POST /api/admin/questions/activate`
 9. `POST /api/admin/questions/reveal`
-10. `POST /api/admin/questions/seed`
-11. `GET /api/admin/answers/current`
+10. `GET /api/admin/answers/current`
 
 ## Frontend Screens
 - Login: name entry.

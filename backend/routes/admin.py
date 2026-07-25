@@ -1,5 +1,4 @@
-import secrets
-from typing import Optional
+from typing import Any, Optional
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -10,6 +9,16 @@ from models import RoundPhase, SetSpecialPlayerBody
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 engine = PubQuizEngine(points_for_correct=10)
+
+
+def _response_data_dict(response) -> dict[str, Any] | None:
+    data = getattr(response, "data", None)
+    return data if isinstance(data, dict) else None
+
+
+def _response_data_list(response) -> list[dict[str, Any]]:
+    data = getattr(response, "data", None)
+    return data if isinstance(data, list) else []
 
 
 def _derive_round_phase(state: dict | None) -> str:
@@ -23,13 +32,12 @@ def _derive_round_phase(state: dict | None) -> str:
 
 
 def _get_state_with_phase(client):
-    state = (
+    state = _response_data_dict(
         client.table("game_state")
         .select("id, is_active, current_question_id, special_player_id, round_started_at, round_ends_at, reveal_answers, updated_at")
         .eq("id", 1)
         .maybe_single()
         .execute()
-        .data
     )
     if state:
         state["phase"] = _derive_round_phase(state)
@@ -37,18 +45,17 @@ def _get_state_with_phase(client):
 
 
 def _fetch_player_score(client, player_id: str):
-    return (
+    return _response_data_dict(
         client.table("players")
         .select("id, score")
         .eq("id", player_id)
         .maybe_single()
         .execute()
-        .data
     )
 
 
 def _fetch_player_answer(client, player_id: str, question_id: str):
-    rows = (
+    rows = _response_data_list(
         client.table("player_answers")
         .select("selected_option")
         .eq("player_id", player_id)
@@ -56,8 +63,6 @@ def _fetch_player_answer(client, player_id: str, question_id: str):
         .order("answered_at", desc=True)
         .limit(1)
         .execute()
-        .data
-        or []
     )
     return rows[0]["selected_option"] if rows else None
 
@@ -71,25 +76,22 @@ def _resolve_benchmark_option(client, question: dict, special_player_id: str | N
 
 
 def _finalize_question_scores(client, question_id: str, special_player_id: str | None = None):
-    question = (
+    question = _response_data_dict(
         client.table("quiz_questions")
         .select("id, correct_option")
         .eq("id", question_id)
         .maybe_single()
         .execute()
-        .data
     )
     if not question:
         return
 
     special_answer = _fetch_player_answer(client, special_player_id, question_id) if special_player_id else None
-    answers = (
+    answers = _response_data_list(
         client.table("player_answers")
         .select("id, player_id, selected_option, is_correct, points_awarded")
         .eq("question_id", question_id)
         .execute()
-        .data
-        or []
     )
 
     for answer in answers:
@@ -194,20 +196,20 @@ def reset_game():
 @router.get("/players", dependencies=[Depends(require_admin)])
 def admin_players():
     client = get_supabase()
-    res = (
+    players = _response_data_list(
         client.table("players")
         .select("id, name, score, created_at")
         .order("score", desc=True)
         .execute()
     )
-    return {"players": res.data or []}
+    return {"players": players}
 
 
 @router.delete("/players/{player_id}", dependencies=[Depends(require_admin)])
 def delete_player(player_id: str):
     client = get_supabase()
-    res = client.table("players").delete().eq("id", player_id).execute()
-    return {"deleted": len(res.data or []) > 0}
+    rows = _response_data_list(client.table("players").delete().eq("id", player_id).execute())
+    return {"deleted": len(rows) > 0}
 
 
 @router.post("/game/special-player", dependencies=[Depends(require_admin)])
@@ -217,13 +219,12 @@ def set_special_player(body: SetSpecialPlayerBody):
 
     special_player_id = (body.special_player_id or "").strip() or None
     if special_player_id:
-        player = (
+        player = _response_data_dict(
             client.table("players")
             .select("id")
             .eq("id", special_player_id)
             .maybe_single()
             .execute()
-            .data
         )
         if not player:
             raise HTTPException(status_code=404, detail="Special player not found")
@@ -267,8 +268,6 @@ async def create_question(request: Request):
     option_d = (pick("option_d", "optionD") or "").strip()
     correct_option_raw = pick("correct_option", "correctOption")
     correct_option = (str(correct_option_raw).strip().upper() if correct_option_raw is not None else "")
-    category_raw = pick("category")
-    category = category_raw.strip() if isinstance(category_raw, str) else None
     duration_raw = pick("duration_seconds", "durationSeconds")
     try:
         duration_seconds = int(duration_raw if duration_raw is not None else 30)
@@ -291,43 +290,42 @@ async def create_question(request: Request):
         "option_c": option_c,
         "option_d": option_d,
         "correct_option": correct_option or None,
-        "category": category,
         "duration_seconds": duration_seconds,
     }
 
     res = client.table("quiz_questions").insert(payload).execute()
-    if not res.data:
+    created = _response_data_list(res)
+    if not created:
         raise HTTPException(status_code=500, detail="Question creation failed")
-    return res.data[0]
+    return created[0]
 
 @router.get("/questions", dependencies=[Depends(require_admin)])
 def list_questions():
     client = get_supabase()
-    res = (
+    questions = _response_data_list(
         client.table("quiz_questions")
-        .select("id, prompt, option_a, option_b, option_c, option_d, correct_option, category, duration_seconds, created_at")
+        .select("id, prompt, option_a, option_b, option_c, option_d, correct_option, duration_seconds, created_at")
         .order("created_at", desc=True)
         .execute()
     )
-    return {"questions": res.data or []}
+    return {"questions": questions}
 
 
 @router.delete("/questions/{question_id}", dependencies=[Depends(require_admin)])
 def delete_question(question_id: str):
     client = get_supabase()
-    state = (
+    state = _response_data_dict(
         client.table("game_state")
         .select("current_question_id, is_active, reveal_answers")
         .eq("id", 1)
         .maybe_single()
         .execute()
-        .data
     )
     if (state or {}).get("current_question_id") == question_id:
         raise HTTPException(status_code=409, detail="Cannot delete the current round question")
 
-    res = client.table("quiz_questions").delete().eq("id", question_id).execute()
-    return {"deleted": len(res.data or []) > 0}
+    rows = _response_data_list(client.table("quiz_questions").delete().eq("id", question_id).execute())
+    return {"deleted": len(rows) > 0}
 
 
 @router.post("/questions/activate", dependencies=[Depends(require_admin)])
@@ -347,13 +345,12 @@ async def activate_question(request: Request):
     if not question_id:
         raise HTTPException(status_code=400, detail="question_id is required")
 
-    question = (
+    question = _response_data_dict(
         client.table("quiz_questions")
         .select("id, duration_seconds")
         .eq("id", question_id)
         .maybe_single()
         .execute()
-        .data
     )
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
@@ -411,13 +408,12 @@ async def reveal_answers(request: Request):
     now = datetime.now(timezone.utc).isoformat()
 
     if reveal:
-        state = (
+        state = _response_data_dict(
             client.table("game_state")
             .select("current_question_id, special_player_id")
             .eq("id", 1)
             .maybe_single()
             .execute()
-            .data
         )
         question_id = (state or {}).get("current_question_id")
         if question_id:
@@ -445,85 +441,36 @@ async def reveal_answers(request: Request):
     return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
 
 
-@router.post("/questions/seed", dependencies=[Depends(require_admin)])
-def seed_questions():
-    client = get_supabase()
-    count = client.table("quiz_questions").select("id").limit(1).execute().data or []
-    if count:
-        return {"seeded": False, "reason": "Questions already exist"}
-
-    nonce = secrets.token_hex(4)
-    rows = [
-        {
-            "prompt": "Which planet is known as the Red Planet?",
-            "option_a": "Venus",
-            "option_b": "Mars",
-            "option_c": "Jupiter",
-            "option_d": "Saturn",
-            "correct_option": "B",
-            "category": f"General-{nonce}",
-            "duration_seconds": 30,
-        },
-        {
-            "prompt": "How many players are on the field per football team in a standard match?",
-            "option_a": "9",
-            "option_b": "10",
-            "option_c": "11",
-            "option_d": "12",
-            "correct_option": "C",
-            "category": f"Sports-{nonce}",
-            "duration_seconds": 20,
-        },
-        {
-            "prompt": "What does HTTP stand for?",
-            "option_a": "HyperText Transfer Protocol",
-            "option_b": "HighText Transfer Program",
-            "option_c": "Hyper Transfer Text Process",
-            "option_d": "Host Transfer Text Protocol",
-            "correct_option": "A",
-            "category": f"Tech-{nonce}",
-            "duration_seconds": 45,
-        },
-    ]
-    res = client.table("quiz_questions").insert(rows).execute()
-    return {"seeded": True, "questions": res.data or []}
-
-
 @router.get("/answers/current", dependencies=[Depends(require_admin)])
 def current_answers():
     client = get_supabase()
-    state = (
+    state = _response_data_dict(
         client.table("game_state")
         .select("current_question_id, special_player_id")
         .eq("id", 1)
         .maybe_single()
         .execute()
-        .data
     )
     question_id = (state or {}).get("current_question_id")
     if not question_id:
         return {"answers": []}
 
-    answers = (
+    answers = _response_data_list(
         client.table("player_answers")
         .select("id, player_id, selected_option, is_correct, points_awarded, answered_at")
         .eq("question_id", question_id)
         .order("answered_at", desc=False)
         .execute()
-        .data
-        or []
     )
 
     player_ids = [row["player_id"] for row in answers]
     players = []
     if player_ids:
-        players = (
+        players = _response_data_list(
             client.table("players")
             .select("id, name")
             .in_("id", player_ids)
             .execute()
-            .data
-            or []
         )
     name_by_id = {row["id"]: row["name"] for row in players}
 

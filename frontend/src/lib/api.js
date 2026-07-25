@@ -62,6 +62,7 @@ function formatError(payload) {
 
 async function request(path, options = {}) {
   const url = `${API_BASE_URL}${path}`;
+  const method = (options.method || "GET").toUpperCase();
   const headers = {
     ...(options.headers || {}),
   };
@@ -73,6 +74,7 @@ async function request(path, options = {}) {
   try {
     res = await fetch(url, {
       ...options,
+      cache: method === "GET" ? "no-store" : options.cache,
       headers,
     });
   } catch {

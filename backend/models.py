@@ -34,13 +34,12 @@ class CreateQuestionBody(BaseModel):
     option_c: str = Field(min_length=1, max_length=200)
     option_d: str = Field(min_length=1, max_length=200)
     correct_option: Optional[AnswerOption] = None
-    category: Optional[str] = Field(default=None, max_length=80)
-    duration_seconds: int = Field(default=30, ge=5, le=600)
+    duration_seconds: int = Field(default=20, ge=5, le=600)
 
 
 class ActivateQuestionBody(BaseModel):
     question_id: str
-    duration_seconds: int = Field(default=30, ge=5, le=600)
+    duration_seconds: int = Field(default=20, ge=5, le=600)
 
 
 class RevealAnswersBody(BaseModel):

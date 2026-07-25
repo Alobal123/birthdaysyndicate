@@ -18,6 +18,16 @@ export default function DashboardPage() {
   const loadRequestRef = useRef(0);
   const lastQuestionIdRef = useRef(null);
 
+  const resetTransientRoundState = () => {
+    setQuizState(null);
+    setQuestion(null);
+    setMyAnswer(null);
+    setBusy(false);
+    setSelected("A");
+    setCountdownSeconds(0);
+    setError("");
+  };
+
   useEffect(() => {
     if (!session) {
       return;
@@ -54,9 +64,20 @@ export default function DashboardPage() {
       }
     };
 
+    resetTransientRoundState();
     loadAll();
 
     const refreshTimer = window.setInterval(loadAll, 5000);
+
+    const onPageShow = (event) => {
+      if (!event.persisted) {
+        return;
+      }
+      resetTransientRoundState();
+      loadAll();
+    };
+
+    window.addEventListener("pageshow", onPageShow);
 
     const channel = supabase
       .channel(`quiz-dashboard-${session.id}`)
@@ -72,6 +93,7 @@ export default function DashboardPage() {
     return () => {
       alive = false;
       window.clearInterval(refreshTimer);
+      window.removeEventListener("pageshow", onPageShow);
       supabase.removeChannel(channel);
     };
   }, [session]);

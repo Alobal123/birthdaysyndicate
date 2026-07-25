@@ -14,12 +14,10 @@ export default function AdminQuestionsPage() {
     option_c: "",
     option_d: "",
     correct_option: "",
-    category: "General",
-    duration_seconds: 30,
+    duration_seconds: 20,
   });
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [loading, setLoading] = useState(false);
 
   const loadQuestions = async (authToken) => {
     if (!authToken) {
@@ -27,13 +25,8 @@ export default function AdminQuestionsPage() {
       return;
     }
 
-    setLoading(true);
-    try {
-      const data = await adminGet("/questions", authToken);
-      setQuestions(data.questions || []);
-    } finally {
-      setLoading(false);
-    }
+    const data = await adminGet("/questions", authToken);
+    setQuestions(data.questions || []);
   };
 
   useEffect(() => {
@@ -76,7 +69,7 @@ export default function AdminQuestionsPage() {
     const option_b = draft.option_b.trim();
     const option_c = draft.option_c.trim();
     const option_d = draft.option_d.trim();
-    const duration_seconds = Number(draft.duration_seconds || 30);
+    const duration_seconds = Number(draft.duration_seconds || 20);
 
     if (prompt.length < 5) {
       throw new Error("Prompt must be at least 5 characters.");
@@ -95,7 +88,6 @@ export default function AdminQuestionsPage() {
       option_c,
       option_d,
       correct_option: draft.correct_option || null,
-      category: draft.category.trim() || null,
       duration_seconds,
     });
 
@@ -106,8 +98,7 @@ export default function AdminQuestionsPage() {
       option_c: "",
       option_d: "",
       correct_option: "",
-      category: "General",
-      duration_seconds: 30,
+      duration_seconds: 20,
     });
     setMessage("Question created");
   };
@@ -125,11 +116,6 @@ export default function AdminQuestionsPage() {
           onChange={(e) => setToken(e.target.value)}
           placeholder="Admin bearer token"
         />
-
-        <div className="mt-4 rounded-xl border border-ink/10 bg-white p-4">
-          <p className="text-xs uppercase tracking-[0.22em] text-steel">Question Count</p>
-          <p className="mt-1 font-display text-2xl text-ink">{loading ? "Syncing..." : `${questions.length} questions`}</p>
-        </div>
 
         <div className="mt-6 grid gap-3 rounded-xl border border-ink/10 bg-white p-4">
           <h2 className="font-display text-xl text-ink">Create Question</h2>
@@ -161,7 +147,7 @@ export default function AdminQuestionsPage() {
             </div>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-[1fr_1fr_140px_auto] sm:items-end">
+          <div className="grid gap-3 sm:grid-cols-[1fr_140px_auto] sm:items-end">
             <div>
               <label className="text-sm font-semibold text-ink">Reference Answer</label>
               <select
@@ -177,10 +163,6 @@ export default function AdminQuestionsPage() {
               </select>
             </div>
             <div>
-              <label className="text-sm font-semibold text-ink">Category</label>
-              <input className="mt-1 w-full" value={draft.category} onChange={(e) => setDraft((prev) => ({ ...prev, category: e.target.value }))} />
-            </div>
-            <div>
               <label className="text-sm font-semibold text-ink">Default Time</label>
               <input
                 className="mt-1 w-full"
@@ -188,7 +170,7 @@ export default function AdminQuestionsPage() {
                 min="5"
                 max="600"
                 value={draft.duration_seconds}
-                onChange={(e) => setDraft((prev) => ({ ...prev, duration_seconds: Number(e.target.value || 30) }))}
+                onChange={(e) => setDraft((prev) => ({ ...prev, duration_seconds: Number(e.target.value || 20) }))}
               />
             </div>
             <button className="btn-accent" onClick={() => run(createQuestion)}>Create</button>
@@ -211,7 +193,7 @@ export default function AdminQuestionsPage() {
                     <p className="text-steel">C: {row.option_c}</p>
                     <p className="text-steel">D: {row.option_d}</p>
                     <p className="text-ink">Reference: {row.correct_option || "N/A"}</p>
-                    <p className="text-steel">Default time: {row.duration_seconds || 30}s</p>
+                    <p className="text-steel">Default time: {row.duration_seconds || 20}s</p>
                   </div>
                   <button
                     className="btn-ghost shrink-0"

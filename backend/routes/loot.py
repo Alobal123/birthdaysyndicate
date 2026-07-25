@@ -10,7 +10,7 @@ def list_questions():
     client = get_supabase()
     rows = (
         client.table("quiz_questions")
-        .select("id, prompt, option_a, option_b, option_c, option_d, category, created_at")
+        .select("id, prompt, option_a, option_b, option_c, option_d, created_at")
         .order("created_at", desc=True)
         .limit(100)
         .execute()

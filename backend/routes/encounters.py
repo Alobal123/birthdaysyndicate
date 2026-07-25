@@ -207,7 +207,7 @@ def get_quiz_state():
         question = (
             _response_data_dict(
             client.table("quiz_questions")
-            .select("id, prompt, option_a, option_b, option_c, option_d, correct_option, category")
+            .select("id, prompt, option_a, option_b, option_c, option_d, correct_option")
             .eq("id", state["current_question_id"])
             .maybe_single()
             .execute()

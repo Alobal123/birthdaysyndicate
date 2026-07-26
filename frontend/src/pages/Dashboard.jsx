@@ -308,7 +308,8 @@ export default function DashboardPage() {
   const benchmarkOption = revealMode ? (question?.correct_option || null) : null;
   const hasQuestion = Boolean(question);
   const showQuestion = hasQuestion && phase !== "IDLE";
-  const canSelect = phase === "OPEN" && countdownSeconds > 0;
+  const canSelect = phase === "OPEN" && countdownSeconds > 0 && !isGameClosed;
+  const isGameReadOnly = state?.game_status === "closed";
 
   return (
     <main className="mx-auto max-w-3xl p-3 sm:p-4 md:p-8">
@@ -321,6 +322,42 @@ export default function DashboardPage() {
         <div className="mt-5 rounded-2xl border border-ink/10 bg-white p-4 sm:p-5">
           {!loaded ? (
             <p className="text-base text-steel">Načítání...</p>
+          ) : isGameReadOnly ? (
+            <>
+              <p className="mb-3 text-sm font-semibold uppercase tracking-[0.18em] text-steel">Hra je uzavřena</p>
+              <p className="text-base text-steel">Tato hra byla ukončena. Všechna data jsou nyní pouze pro čtení.</p>
+              {isGameOver && leaderboard.length > 0 ? (
+                <>
+                  <p className="mt-5 mb-3 text-sm font-semibold uppercase tracking-[0.18em] text-steel">Konečné pořadí</p>
+                  <ul className="space-y-3">
+                    {leaderboard.map((entry, index) => {
+                      const rank = index + 1;
+                      const isTop3 = rank <= 3;
+                      const rankTone =
+                        rank === 1
+                          ? "border-amber-400 bg-amber-50"
+                          : rank === 2
+                            ? "border-slate-300 bg-slate-50"
+                            : rank === 3
+                              ? "border-orange-300 bg-orange-50"
+                              : "border-ink/10 bg-white";
+
+                      return (
+                        <li
+                          key={entry.id}
+                          className={`rounded-xl border px-4 py-3 ${rankTone} ${isTop3 ? "text-lg sm:text-xl font-semibold" : "text-base"}`}
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="truncate">{rank}. {entry.name}</span>
+                            <span className="font-display text-xl sm:text-2xl">{entry.score}</span>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </>
+              ) : null}
+            </>
           ) : isGameOver ? (
             <>
               <p className="mb-3 text-sm font-semibold uppercase tracking-[0.18em] text-steel">Konečné pořadí</p>

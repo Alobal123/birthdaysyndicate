@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-from routes import admin, encounters, loot, players
+from routes import admin, encounters, games, loot, players
 
 load_dotenv(Path(__file__).with_name(".env"))
 
@@ -28,9 +28,16 @@ app.add_middleware(
 )
 
 app.include_router(players.router)
+app.include_router(games.router)
 app.include_router(encounters.router)
 app.include_router(loot.router)
 app.include_router(admin.router)
+
+# Ensure default game exists on startup
+@app.on_event("startup")
+async def startup_event():
+    from routes.games import ensure_default_game
+    ensure_default_game()
 
 
 @app.get("/")

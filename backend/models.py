@@ -20,6 +20,7 @@ class RoundPhase(str, Enum):
 
 class CreatePlayerBody(BaseModel):
     name: str = Field(min_length=1, max_length=60)
+    game_id: Optional[str] = None
 
 
 class SubmitAnswerBody(BaseModel):
@@ -48,3 +49,17 @@ class RevealAnswersBody(BaseModel):
 
 class SetSpecialPlayerBody(BaseModel):
     special_player_id: Optional[str] = None
+
+
+class CreateGameBody(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
+
+class AddGameQuestionBody(BaseModel):
+    question_id: str
+    question_order: Optional[int] = None
+
+
+class ReorderGameQuestionsBody(BaseModel):
+    question_id: str
+    question_order: int

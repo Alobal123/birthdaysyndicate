@@ -19,6 +19,18 @@ def _response_data_list(response) -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
+def _get_active_game(client):
+    """Get the first active game, or return None"""
+    games = _response_data_list(
+        client.table("games")
+        .select("id")
+        .eq("status", "active")
+        .limit(1)
+        .execute()
+    )
+    return games[0]["id"] if games else None
+
+
 @router.post("/players")
 def create_player(body: CreatePlayerBody):
     client = get_supabase()
@@ -26,10 +38,19 @@ def create_player(body: CreatePlayerBody):
     if not normalized_name:
         raise HTTPException(status_code=400, detail="Player name cannot be empty")
 
+    # Use provided game_id or get active game
+    game_id = body.game_id
+    if not game_id:
+        game_id = _get_active_game(client)
+    
+    if not game_id:
+        raise HTTPException(status_code=400, detail="No active game available")
+
     try:
         existing = _response_data_list(
             client.table("players")
             .select("id, name, score, created_at")
+            .eq("game_id", game_id)
             .eq("name", normalized_name)
             .limit(1)
             .execute()
@@ -39,7 +60,7 @@ def create_player(body: CreatePlayerBody):
 
         created = _response_data_list(
             client.table("players")
-            .insert({"name": normalized_name})
+            .insert({"game_id": game_id, "name": normalized_name, "score": 0})
             .execute()
         )
     except Exception as exc:
@@ -61,7 +82,7 @@ def get_player(player_id: str):
     try:
         player = _response_data_dict(
             client.table("players")
-            .select("id, name, score, created_at")
+            .select("id, game_id, name, score, created_at")
             .eq("id", player_id)
             .maybe_single()
             .execute()
@@ -75,12 +96,21 @@ def get_player(player_id: str):
 
 
 @router.get("/leaderboard")
-def leaderboard():
+def leaderboard(game_id: str = None):
     client = get_supabase()
+    
+    # If no game_id provided, use active game
+    if not game_id:
+        game_id = _get_active_game(client)
+    
+    if not game_id:
+        raise HTTPException(status_code=400, detail="No active game available")
+    
     try:
         players = _response_data_list(
             client.table("players")
             .select("id, name, score")
+            .eq("game_id", game_id)
             .order("score", desc=True)
             .order("created_at", desc=False)
             .execute()

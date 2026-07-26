@@ -24,20 +24,20 @@ def _response_data_list(response) -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
-def _get_game_state(client):
+def _get_game_state(client, game_id: str):
     try:
         state = _response_data_dict(
             client.table("game_state")
-            .select("id, is_active, game_over, current_question_id, special_player_id, round_started_at, round_ends_at, reveal_answers, updated_at")
-            .eq("id", 1)
+            .select("id, game_id, is_active, game_over, current_question_id, special_player_id, round_started_at, round_ends_at, reveal_answers, updated_at")
+            .eq("game_id", game_id)
             .maybe_single()
             .execute()
         )
     except Exception:
         state = _response_data_dict(
             client.table("game_state")
-            .select("id, is_active, current_question_id, special_player_id, round_started_at, round_ends_at, reveal_answers, updated_at")
-            .eq("id", 1)
+            .select("id, game_id, is_active, current_question_id, special_player_id, round_started_at, round_ends_at, reveal_answers, updated_at")
+            .eq("game_id", game_id)
             .maybe_single()
             .execute()
         )
@@ -50,24 +50,25 @@ def _get_game_state(client):
     return state
 
 
-def _upsert_game_state(client, payload: dict[str, Any]):
+def _upsert_game_state(client, game_id: str, payload: dict[str, Any]):
+    # Always use update since game_state is created when game is created
     try:
-        return client.table("game_state").upsert(payload).execute()
+        return client.table("game_state").update(payload).eq("game_id", game_id).execute()
     except Exception:
         if "game_over" not in payload:
             raise
         fallback_payload = {k: v for k, v in payload.items() if k != "game_over"}
-        return client.table("game_state").upsert(fallback_payload).execute()
+        return client.table("game_state").update(fallback_payload).eq("game_id", game_id).execute()
 
 
-def _update_game_state(client, payload: dict[str, Any]):
+def _update_game_state(client, game_id: str, payload: dict[str, Any]):
     try:
-        return client.table("game_state").update(payload).eq("id", 1).execute()
+        return client.table("game_state").update(payload).eq("game_id", game_id).execute()
     except Exception:
         if "game_over" not in payload:
             raise
         fallback_payload = {k: v for k, v in payload.items() if k != "game_over"}
-        return client.table("game_state").update(fallback_payload).eq("id", 1).execute()
+        return client.table("game_state").update(fallback_payload).eq("game_id", game_id).execute()
 
 
 def _derive_round_phase(state: dict | None) -> str:
@@ -80,8 +81,8 @@ def _derive_round_phase(state: dict | None) -> str:
     return RoundPhase.CLOSED.value
 
 
-def _get_state_with_phase(client):
-    state = _get_game_state(client)
+def _get_state_with_phase(client, game_id: str):
+    state = _get_game_state(client, game_id)
     if state:
         state["phase"] = _derive_round_phase(state)
     return state
@@ -97,9 +98,19 @@ def _fetch_player_score(client, player_id: str):
     )
 
 
-def _rebuild_player_scores(client):
-    players = _response_data_list(client.table("players").select("id").execute())
-    answer_rows = _response_data_list(client.table("player_answers").select("player_id, points_awarded").execute())
+def _rebuild_player_scores(client, game_id: str):
+    players = _response_data_list(
+        client.table("players")
+        .select("id")
+        .eq("game_id", game_id)
+        .execute()
+    )
+    answer_rows = _response_data_list(
+        client.table("player_answers")
+        .select("player_id, points_awarded")
+        .eq("game_id", game_id)
+        .execute()
+    )
 
     totals: dict[str, int] = {}
     for row in answer_rows:
@@ -225,30 +236,80 @@ def require_admin(authorization: Optional[str] = Header(default=None)):
 
 
 @router.post("/game/start", dependencies=[Depends(require_admin)])
-def start_game():
+def start_game(game_id: str = None):
     client = get_supabase()
+    
+    if not game_id:
+        # Get active game
+        games = _response_data_list(
+            client.table("games")
+            .select("id")
+            .eq("status", "active")
+            .limit(1)
+            .execute()
+        )
+        if not games:
+            raise HTTPException(status_code=400, detail="No active game available")
+        game_id = games[0]["id"]
+    
     now = datetime.now(timezone.utc).isoformat()
-    res = _upsert_game_state(client, {"id": 1, "is_active": True, "game_over": False, "updated_at": now})
-    return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
+    res = _upsert_game_state(
+        client,
+        game_id,
+        {"game_id": game_id, "is_active": True, "game_over": False, "updated_at": now}
+    )
+    return _get_state_with_phase(client, game_id) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.post("/game/stop", dependencies=[Depends(require_admin)])
-def stop_game():
+def stop_game(game_id: str = None):
     client = get_supabase()
+    
+    if not game_id:
+        # Get active game
+        games = _response_data_list(
+            client.table("games")
+            .select("id")
+            .eq("status", "active")
+            .limit(1)
+            .execute()
+        )
+        if not games:
+            raise HTTPException(status_code=400, detail="No active game available")
+        game_id = games[0]["id"]
+    
     now = datetime.now(timezone.utc).isoformat()
-    res = _update_game_state(client, {"is_active": False, "game_over": False, "updated_at": now})
-    return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
+    res = _update_game_state(
+        client,
+        game_id,
+        {"is_active": False, "game_over": False, "updated_at": now}
+    )
+    return _get_state_with_phase(client, game_id) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.post("/game/end", dependencies=[Depends(require_admin)])
-def end_game():
+def end_game(game_id: str = None):
     client = get_supabase()
+    
+    if not game_id:
+        # Get active game
+        games = _response_data_list(
+            client.table("games")
+            .select("id")
+            .eq("status", "active")
+            .limit(1)
+            .execute()
+        )
+        if not games:
+            raise HTTPException(status_code=400, detail="No active game available")
+        game_id = games[0]["id"]
+    
     now = datetime.now(timezone.utc).isoformat()
 
     state = _response_data_dict(
         client.table("game_state")
         .select("current_question_id, special_player_id")
-        .eq("id", 1)
+        .eq("game_id", game_id)
         .maybe_single()
         .execute()
     )
@@ -258,8 +319,9 @@ def end_game():
 
     res = _upsert_game_state(
         client,
+        game_id,
         {
-            "id": 1,
+            "game_id": game_id,
             "is_active": False,
             "game_over": True,
             "current_question_id": None,
@@ -269,39 +331,30 @@ def end_game():
             "updated_at": now,
         },
     )
-    return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
-
-
-@router.post("/game/reset", dependencies=[Depends(require_admin)])
-def reset_game():
-    client = get_supabase()
-    now = datetime.now(timezone.utc).isoformat()
-
-    client.table("players").update({"score": 0}).gte("score", -2147483648).execute()
-    client.table("player_answers").delete().gte("points_awarded", 0).execute()
-
-    res = _upsert_game_state(
-        client,
-        {
-            "id": 1,
-            "is_active": False,
-            "game_over": False,
-            "current_question_id": None,
-            "round_started_at": None,
-            "round_ends_at": None,
-            "reveal_answers": False,
-            "updated_at": now,
-        },
-    )
-    return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
+    return _get_state_with_phase(client, game_id) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.get("/players", dependencies=[Depends(require_admin)])
-def admin_players():
+def admin_players(game_id: str = None):
     client = get_supabase()
+    
+    if not game_id:
+        # Get active game
+        games = _response_data_list(
+            client.table("games")
+            .select("id")
+            .eq("status", "active")
+            .limit(1)
+            .execute()
+        )
+        if not games:
+            raise HTTPException(status_code=400, detail="No active game available")
+        game_id = games[0]["id"]
+    
     players = _response_data_list(
         client.table("players")
         .select("id, name, score, created_at")
+        .eq("game_id", game_id)
         .order("score", desc=True)
         .execute()
     )
@@ -316,8 +369,22 @@ def delete_player(player_id: str):
 
 
 @router.post("/game/special-player", dependencies=[Depends(require_admin)])
-def set_special_player(body: SetSpecialPlayerBody):
+def set_special_player(body: SetSpecialPlayerBody, game_id: str = None):
     client = get_supabase()
+    
+    if not game_id:
+        # Get active game
+        games = _response_data_list(
+            client.table("games")
+            .select("id")
+            .eq("status", "active")
+            .limit(1)
+            .execute()
+        )
+        if not games:
+            raise HTTPException(status_code=400, detail="No active game available")
+        game_id = games[0]["id"]
+    
     now = datetime.now(timezone.utc).isoformat()
 
     special_player_id = (body.special_player_id or "").strip() or None
@@ -326,6 +393,7 @@ def set_special_player(body: SetSpecialPlayerBody):
             client.table("players")
             .select("id")
             .eq("id", special_player_id)
+            .eq("game_id", game_id)
             .maybe_single()
             .execute()
         )
@@ -334,13 +402,14 @@ def set_special_player(body: SetSpecialPlayerBody):
 
     res = _upsert_game_state(
         client,
+        game_id,
         {
-            "id": 1,
+            "game_id": game_id,
             "special_player_id": special_player_id,
             "updated_at": now,
         },
     )
-    return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
+    return _get_state_with_phase(client, game_id) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.post("/questions", dependencies=[Depends(require_admin)])
@@ -557,12 +626,26 @@ async def upload_question_image(question_id: str, image: UploadFile = File(...))
 
 
 @router.delete("/questions/{question_id}", dependencies=[Depends(require_admin)])
-def delete_question(question_id: str):
+def delete_question(question_id: str, game_id: str = None):
     client = get_supabase()
+    
+    if not game_id:
+        # Get active game
+        games = _response_data_list(
+            client.table("games")
+            .select("id")
+            .eq("status", "active")
+            .limit(1)
+            .execute()
+        )
+        if not games:
+            raise HTTPException(status_code=400, detail="No active game available")
+        game_id = games[0]["id"]
+    
     state = _response_data_dict(
         client.table("game_state")
         .select("current_question_id, is_active, reveal_answers")
-        .eq("id", 1)
+        .eq("game_id", game_id)
         .maybe_single()
         .execute()
     )
@@ -574,8 +657,21 @@ def delete_question(question_id: str):
 
 
 @router.post("/questions/activate", dependencies=[Depends(require_admin)])
-async def activate_question(request: Request):
+async def activate_question(request: Request, game_id: str = None):
     client = get_supabase()
+    
+    if not game_id:
+        # Get active game
+        games = _response_data_list(
+            client.table("games")
+            .select("id")
+            .eq("status", "active")
+            .limit(1)
+            .execute()
+        )
+        if not games:
+            raise HTTPException(status_code=400, detail="No active game available")
+        game_id = games[0]["id"]
 
     try:
         body = await request.json()
@@ -612,12 +708,16 @@ async def activate_question(request: Request):
     if duration_seconds < 5 or duration_seconds > 600:
         raise HTTPException(status_code=400, detail="duration_seconds must be between 5 and 600")
 
+    # Mark this question as activated in game_questions
     now = datetime.now(timezone.utc)
+    client.table("game_questions").update({"activated_at": now.isoformat()}).eq("game_id", game_id).eq("question_id", question_id).execute()
+
     ends_at = now + timedelta(seconds=duration_seconds)
     res = _upsert_game_state(
         client,
+        game_id,
         {
-            "id": 1,
+            "game_id": game_id,
             "is_active": True,
             "game_over": False,
             "current_question_id": question_id,
@@ -627,12 +727,26 @@ async def activate_question(request: Request):
             "updated_at": now.isoformat(),
         },
     )
-    return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
+    return _get_state_with_phase(client, game_id) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.post("/questions/reveal", dependencies=[Depends(require_admin)])
-async def reveal_answers(request: Request):
+async def reveal_answers(request: Request, game_id: str = None):
     client = get_supabase()
+    
+    if not game_id:
+        # Get active game
+        games = _response_data_list(
+            client.table("games")
+            .select("id")
+            .eq("status", "active")
+            .limit(1)
+            .execute()
+        )
+        if not games:
+            raise HTTPException(status_code=400, detail="No active game available")
+        game_id = games[0]["id"]
+    
     try:
         body = await request.json()
     except Exception:
@@ -654,7 +768,7 @@ async def reveal_answers(request: Request):
         state = _response_data_dict(
             client.table("game_state")
             .select("current_question_id, special_player_id")
-            .eq("id", 1)
+            .eq("game_id", game_id)
             .maybe_single()
             .execute()
         )
@@ -666,6 +780,7 @@ async def reveal_answers(request: Request):
 
         res = _update_game_state(
             client,
+            game_id,
             {
                 "reveal_answers": True,
                 "is_active": False,
@@ -675,18 +790,32 @@ async def reveal_answers(request: Request):
             },
         )
     else:
-        res = _update_game_state(client, {"reveal_answers": False, "updated_at": now})
+        res = _update_game_state(client, game_id, {"reveal_answers": False, "updated_at": now})
 
-    return _get_state_with_phase(client) or (res.data[0] if res.data else {"ok": True})
+    return _get_state_with_phase(client, game_id) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.get("/answers/current", dependencies=[Depends(require_admin)])
-def current_answers():
+def current_answers(game_id: str = None):
     client = get_supabase()
+    
+    if not game_id:
+        # Get active game
+        games = _response_data_list(
+            client.table("games")
+            .select("id")
+            .eq("status", "active")
+            .limit(1)
+            .execute()
+        )
+        if not games:
+            raise HTTPException(status_code=400, detail="No active game available")
+        game_id = games[0]["id"]
+    
     state = _response_data_dict(
         client.table("game_state")
         .select("current_question_id, special_player_id")
-        .eq("id", 1)
+        .eq("game_id", game_id)
         .maybe_single()
         .execute()
     )
@@ -697,6 +826,7 @@ def current_answers():
     answers = _response_data_list(
         client.table("player_answers")
         .select("id, player_id, selected_option, is_correct, points_awarded, answered_at")
+        .eq("game_id", game_id)
         .eq("question_id", question_id)
         .order("answered_at", desc=False)
         .execute()

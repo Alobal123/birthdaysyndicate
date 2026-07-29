@@ -35,6 +35,11 @@ export default function LoginPage() {
         <p className="text-xs uppercase tracking-[0.22em] text-steel">Birthday Syndicate</p>
         <h1 className="mt-2 font-display text-3xl text-ink">Join The Pub Quiz</h1>
         <p className="mt-2 text-sm text-steel">Use your name to join the live round.</p>
+        <ul className="mt-4 space-y-1 rounded-xl border border-ink/10 bg-white/70 p-3 text-sm text-steel">
+          <li>• Vymysli si přezdívku.</li>
+          <li>• Odpověď vyber během odpočtu.</li>
+          <li>• Bodování: správná odpověď nebo stejná odpověď jako Klárka = 10 bodů</li>
+        </ul>
         <form onSubmit={onSubmit} className="mt-6 space-y-3">
           <input
             value={name}

@@ -100,8 +100,9 @@ export function getPlayer(id) {
   return request(`/api/players/${id}`);
 }
 
-export function getLeaderboard() {
-  return request("/api/leaderboard");
+export function getLeaderboard(gameId) {
+  const query = gameId ? `?game_id=${encodeURIComponent(gameId)}` : "";
+  return request(`/api/leaderboard${query}`);
 }
 
 export function getQuizState(playerId) {

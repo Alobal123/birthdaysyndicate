@@ -48,6 +48,35 @@ function localizeErrorMessage(message) {
   return "Došlo k chybě.";
 }
 
+function buildFinalPlacements(rows) {
+  const placements = [];
+  let index = 0;
+
+  while (index < rows.length) {
+    const score = Number(rows[index]?.score ?? 0);
+    let end = index;
+    while (end + 1 < rows.length && Number(rows[end + 1]?.score ?? 0) === score) {
+      end += 1;
+    }
+
+    const startRank = index + 1;
+    const endRank = end + 1;
+    const placeLabel = startRank === endRank ? `${startRank}. místo` : `${startRank}-${endRank}. místo`;
+
+    for (let i = index; i <= end; i += 1) {
+      placements.push({
+        ...rows[i],
+        placeLabel,
+        placeStart: startRank,
+      });
+    }
+
+    index = end + 1;
+  }
+
+  return placements;
+}
+
 export default function DashboardPage() {
   const navigate = useNavigate();
   const session = loadPlayerSession();
@@ -92,11 +121,13 @@ export default function DashboardPage() {
         const phase = derivePhase(state);
         const questionId = state?.current_question_id ?? question?.id ?? null;
         const gameOver = Boolean(state?.game_over);
+        const gameClosed = state?.game_status === "closed";
+        const gameId = playerData?.game_id || state?.game_id || null;
 
         let leaderboardPlayers = [];
-        if (gameOver) {
+        if (gameOver || gameClosed) {
           try {
-            const board = await getLeaderboard();
+            const board = await getLeaderboard(gameId);
             leaderboardPlayers = board?.players || [];
           } catch {
             leaderboardPlayers = [];
@@ -320,6 +351,36 @@ export default function DashboardPage() {
   const showQuestion = hasQuestion && phase !== "IDLE";
   const isGameReadOnly = state?.game_status === "closed";
   const canSelect = phase === "OPEN" && countdownSeconds > 0 && !isGameReadOnly;
+  const finalLeaderboard = buildFinalPlacements(leaderboard);
+
+  const renderFinalLeaderboard = () => (
+    <ul className="space-y-3">
+      {finalLeaderboard.map((entry) => {
+        const rank = entry.placeStart;
+        const isTop3 = rank <= 3;
+        const rankTone =
+          rank === 1
+            ? "border-amber-400 bg-amber-50"
+            : rank === 2
+              ? "border-slate-300 bg-slate-50"
+              : rank === 3
+                ? "border-orange-300 bg-orange-50"
+                : "border-ink/10 bg-white";
+
+        return (
+          <li
+            key={entry.id}
+            className={`rounded-xl border px-4 py-3 ${rankTone} ${isTop3 ? "text-lg sm:text-xl font-semibold" : "text-base"}`}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <span className="truncate">{entry.placeLabel} {entry.name}</span>
+              <span className="font-display text-xl sm:text-2xl">{entry.score}</span>
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
 
   return (
     <main className="mx-auto max-w-3xl p-3 sm:p-4 md:p-8">
@@ -334,69 +395,13 @@ export default function DashboardPage() {
             <p className="text-base text-steel">Načítání...</p>
           ) : isGameReadOnly ? (
             <>
-              <p className="mb-3 text-sm font-semibold uppercase tracking-[0.18em] text-steel">Hra je uzavřena</p>
-              <p className="text-base text-steel">Tato hra byla ukončena. Všechna data jsou nyní pouze pro čtení.</p>
-              {isGameOver && leaderboard.length > 0 ? (
-                <>
-                  <p className="mt-5 mb-3 text-sm font-semibold uppercase tracking-[0.18em] text-steel">Konečné pořadí</p>
-                  <ul className="space-y-3">
-                    {leaderboard.map((entry, index) => {
-                      const rank = index + 1;
-                      const isTop3 = rank <= 3;
-                      const rankTone =
-                        rank === 1
-                          ? "border-amber-400 bg-amber-50"
-                          : rank === 2
-                            ? "border-slate-300 bg-slate-50"
-                            : rank === 3
-                              ? "border-orange-300 bg-orange-50"
-                              : "border-ink/10 bg-white";
-
-                      return (
-                        <li
-                          key={entry.id}
-                          className={`rounded-xl border px-4 py-3 ${rankTone} ${isTop3 ? "text-lg sm:text-xl font-semibold" : "text-base"}`}
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <span className="truncate">{rank}. {entry.name}</span>
-                            <span className="font-display text-xl sm:text-2xl">{entry.score}</span>
-                          </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </>
-              ) : null}
+              <p className="mb-3 text-sm font-semibold uppercase tracking-[0.18em] text-steel">Konečné pořadí</p>
+              {renderFinalLeaderboard()}
             </>
           ) : isGameOver ? (
             <>
               <p className="mb-3 text-sm font-semibold uppercase tracking-[0.18em] text-steel">Konečné pořadí</p>
-              <ul className="space-y-3">
-                {leaderboard.map((entry, index) => {
-                  const rank = index + 1;
-                  const isTop3 = rank <= 3;
-                  const rankTone =
-                    rank === 1
-                      ? "border-amber-400 bg-amber-50"
-                      : rank === 2
-                        ? "border-slate-300 bg-slate-50"
-                        : rank === 3
-                          ? "border-orange-300 bg-orange-50"
-                          : "border-ink/10 bg-white";
-
-                  return (
-                    <li
-                      key={entry.id}
-                      className={`rounded-xl border px-4 py-3 ${rankTone} ${isTop3 ? "text-lg sm:text-xl font-semibold" : "text-base"}`}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="truncate">{rank}. {entry.name}</span>
-                        <span className="font-display text-xl sm:text-2xl">{entry.score}</span>
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
+              {renderFinalLeaderboard()}
             </>
           ) : !showQuestion ? (
             <p className="text-base text-steel">Momentálně není aktivní otázka.</p>

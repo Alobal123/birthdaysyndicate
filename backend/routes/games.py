@@ -136,6 +136,7 @@ def get_game_questions(game_id: str, authorization: str = Header(None)):
                 game_id,
                 question_id,
                 question_order,
+                activated_at,
                 quiz_questions:question_id(
                     id,
                     prompt,

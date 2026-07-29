@@ -736,6 +736,19 @@ async def activate_question(request: Request, game_id: Optional[str] = None):
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
 
+    game_question = _response_data_dict(
+        client.table("game_questions")
+        .select("id, activated_at")
+        .eq("game_id", game_id)
+        .eq("question_id", question_id)
+        .maybe_single()
+        .execute()
+    )
+    if not game_question:
+        raise HTTPException(status_code=409, detail="Question is not in this game")
+    if game_question.get("activated_at"):
+        raise HTTPException(status_code=409, detail="Question was already asked in this game")
+
     duration_raw = body.get("duration_seconds", body.get("durationSeconds"))
     if duration_raw is None:
         duration_seconds = int(question.get("duration_seconds") or 30)

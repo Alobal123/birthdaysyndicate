@@ -4,9 +4,15 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException
 
 from database import get_supabase
+from in_memory_cache import cache_delete, cache_get, cache_set
 from models import CreatePlayerBody
 
 router = APIRouter(prefix="/api", tags=["players"])
+
+ACTIVE_GAME_CACHE_KEY = "players:active_game"
+ACTIVE_GAME_TTL_SECONDS = 2.0
+PLAYER_TTL_SECONDS = 2.0
+LEADERBOARD_TTL_SECONDS = 1.0
 
 
 def _response_data_dict(response) -> dict[str, Any] | None:
@@ -21,6 +27,10 @@ def _response_data_list(response) -> list[dict[str, Any]]:
 
 def _get_active_game(client):
     """Get the first active game, or return None"""
+    cached = cache_get(ACTIVE_GAME_CACHE_KEY)
+    if cached:
+        return str(cached)
+
     games = _response_data_list(
         client.table("games")
         .select("id")
@@ -28,7 +38,10 @@ def _get_active_game(client):
         .limit(1)
         .execute()
     )
-    return games[0]["id"] if games else None
+    game_id = games[0]["id"] if games else None
+    if game_id:
+        cache_set(ACTIVE_GAME_CACHE_KEY, game_id, ACTIVE_GAME_TTL_SECONDS)
+    return game_id
 
 
 @router.post("/players")
@@ -68,6 +81,8 @@ def create_player(body: CreatePlayerBody):
 
     if not created:
         raise HTTPException(status_code=500, detail="Player creation failed")
+
+    cache_delete(f"players:leaderboard:{game_id}")
     return created[0]
 
 
@@ -79,6 +94,11 @@ def get_player(player_id: str):
         raise HTTPException(status_code=400, detail="Invalid player id")
 
     client = get_supabase()
+    cache_key = f"players:by_id:{player_id}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
     try:
         player = _response_data_dict(
             client.table("players")
@@ -92,6 +112,7 @@ def get_player(player_id: str):
 
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
+    cache_set(cache_key, player, PLAYER_TTL_SECONDS)
     return player
 
 
@@ -105,6 +126,11 @@ def leaderboard(game_id: str = None):
     
     if not game_id:
         raise HTTPException(status_code=400, detail="No active game available")
+
+    cache_key = f"players:leaderboard:{game_id}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return {"players": cached}
     
     try:
         players = _response_data_list(
@@ -117,4 +143,5 @@ def leaderboard(game_id: str = None):
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Leaderboard service unavailable") from exc
+    cache_set(cache_key, players, LEADERBOARD_TTL_SECONDS)
     return {"players": players}

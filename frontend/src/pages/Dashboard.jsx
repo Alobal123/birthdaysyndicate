@@ -93,17 +93,6 @@ export default function DashboardPage() {
         const questionId = state?.current_question_id ?? question?.id ?? null;
         const gameOver = Boolean(state?.game_over);
 
-        let myAnswer = null;
-        if (questionId && !gameOver) {
-          try {
-            const answerData = await getPlayerAnswer(questionId, sessionId);
-            myAnswer = answerData.answer || null;
-          } catch {
-            // Keep rendering the question even if answer lookup fails transiently.
-            myAnswer = null;
-          }
-        }
-
         let leaderboardPlayers = [];
         if (gameOver) {
           try {
@@ -125,10 +114,31 @@ export default function DashboardPage() {
           // keep the last known question to avoid "No active question" flicker.
           const effectiveQuestion = phase === "REVEAL" && !question ? (prev?.question || null) : question;
           const effectiveQuestionId = questionId ?? (phase === "REVEAL" ? (prev?.questionId || null) : null);
-          return { state, question: effectiveQuestion, questionId: effectiveQuestionId, myAnswer };
+          const previousAnswer = prev?.questionId === effectiveQuestionId ? (prev?.myAnswer || null) : null;
+          return { state, question: effectiveQuestion, questionId: effectiveQuestionId, myAnswer: previousAnswer };
         });
         setLoaded(true);
         setError("");
+
+        // Do not block question rendering on answer lookup.
+        if (questionId && !gameOver) {
+          getPlayerAnswer(questionId, sessionId)
+            .then((answerData) => {
+              if (!alive || requestId !== loadRequestRef.current) {
+                return;
+              }
+              const answer = answerData?.answer || null;
+              setSnapshot((prev) => {
+                if (!prev || prev.questionId !== questionId) {
+                  return prev;
+                }
+                return { ...prev, myAnswer: answer };
+              });
+            })
+            .catch(() => {
+              // Best-effort hydration only; keep UI responsive.
+            });
+        }
       } catch (err) {
         if (!alive || requestId !== loadRequestRef.current) {
           return;

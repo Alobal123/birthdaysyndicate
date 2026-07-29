@@ -1,15 +1,32 @@
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 
 from database import get_supabase
+from in_memory_cache import cache_delete, cache_delete_prefix, cache_get, cache_set
 from engine import PubQuizEngine
 from models import RoundPhase, SubmitAnswerBody
 
 router = APIRouter(prefix="/api", tags=["quiz"])
 engine = PubQuizEngine(points_for_correct=10)
 ANSWER_GRACE_SECONDS = 3
+GAME_STATE_TTL_SECONDS = 0.75
+QUIZ_STATE_TTL_SECONDS = 0.5
+QUESTION_TTL_SECONDS = 30.0
+PLAYER_ANSWER_TTL_SECONDS = 0.75
+
+
+def _invalidate_game_caches(game_id: str):
+    cache_delete(f"quiz:state:{game_id}")
+    cache_delete(f"quiz:game_state:{game_id}")
+    cache_delete(f"players:leaderboard:{game_id}")
+    cache_delete_prefix(f"quiz:player_answer:{game_id}:")
+
+
+def _invalidate_question_cache(question_id: str | None):
+    if question_id:
+        cache_delete(f"quiz:question:{question_id}")
 
 
 def _response_data_dict(response) -> dict[str, Any] | None:
@@ -22,7 +39,13 @@ def _response_data_list(response) -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
-def _get_game_state(client, game_id: str):
+def _get_game_state(client, game_id: str, *, use_cache: bool = True):
+    cache_key = f"quiz:game_state:{game_id}"
+    if use_cache:
+        cached = cache_get(cache_key)
+        if cached is not None:
+            return cached
+
     try:
         state = _response_data_dict(
             client.table("game_state")
@@ -42,19 +65,25 @@ def _get_game_state(client, game_id: str):
         )
         if state is not None:
             state["game_over"] = False
+            cache_set(cache_key, state, GAME_STATE_TTL_SECONDS)
         return state
 
     if state is not None and "game_over" not in state:
         state["game_over"] = False
+    if state is not None:
+        cache_set(cache_key, state, GAME_STATE_TTL_SECONDS)
     return state
 
 
 def _safe_update_game_state(client, game_id: str, payload: dict[str, Any], *, require_active_question_id: str | None = None):
+    _invalidate_game_caches(game_id)
     query = client.table("game_state").update(payload).eq("game_id", game_id)
     if require_active_question_id is not None:
         query = query.eq("is_active", True).eq("current_question_id", require_active_question_id)
     try:
-        return query.execute()
+        result = query.execute()
+        _invalidate_game_caches(game_id)
+        return result
     except Exception:
         if "game_over" not in payload:
             raise
@@ -62,7 +91,9 @@ def _safe_update_game_state(client, game_id: str, payload: dict[str, Any], *, re
         fallback_query = client.table("game_state").update(fallback_payload).eq("game_id", game_id)
         if require_active_question_id is not None:
             fallback_query = fallback_query.eq("is_active", True).eq("current_question_id", require_active_question_id)
-        return fallback_query.execute()
+        result = fallback_query.execute()
+        _invalidate_game_caches(game_id)
+        return result
 
 
 def _now_iso() -> str:
@@ -80,6 +111,11 @@ def _parse_iso_datetime(value: str | None):
 
 
 def _fetch_player(player_id: str):
+    cache_key = f"players:by_id:{player_id}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     client = get_supabase()
     response = (
         client.table("players")
@@ -88,7 +124,10 @@ def _fetch_player(player_id: str):
         .maybe_single()
         .execute()
     )
-    return _response_data_dict(response)
+    player = _response_data_dict(response)
+    if player is not None:
+        cache_set(cache_key, player, 2.0)
+    return player
 
 
 def _rebuild_player_scores(client, game_id: str):
@@ -125,6 +164,14 @@ def _rebuild_player_scores(client, game_id: str):
 
 
 def _fetch_player_answer(client, player_id: str, question_id: str):
+    player = _fetch_player(player_id)
+    game_id = (player or {}).get("game_id")
+    cache_key = f"quiz:player_answer:{game_id}:{question_id}:{player_id}" if game_id else None
+    if cache_key:
+        cached = cache_get(cache_key)
+        if cached is not None:
+            return cached
+
     rows = _response_data_list(
         client.table("player_answers")
         .select("selected_option")
@@ -134,7 +181,10 @@ def _fetch_player_answer(client, player_id: str, question_id: str):
         .limit(1)
         .execute()
     )
-    return rows[0]["selected_option"] if rows else None
+    selected_option = rows[0]["selected_option"] if rows else None
+    if cache_key:
+        cache_set(cache_key, selected_option, PLAYER_ANSWER_TTL_SECONDS)
+    return selected_option
 
 
 def _resolve_benchmark_option(client, question: dict, special_player_id: str | None, question_id: str):
@@ -216,7 +266,7 @@ def _score_and_finalize_round(client, game_id: str, question_id: str, special_pl
 
 
 def _finalize_round_if_needed(client, game_id: str):
-    state = _get_game_state(client, game_id)
+    state = _get_game_state(client, game_id, use_cache=False)
     if not state:
         return None
 
@@ -249,11 +299,11 @@ def _finalize_round_if_needed(client, game_id: str):
         if lock_res.data:
             _score_and_finalize_round(client, game_id, question_id, state.get("special_player_id"))
 
-    return _with_phase(_get_game_state(client, game_id))
+    return _with_phase(_get_game_state(client, game_id, use_cache=False))
 
 
 @router.get("/quiz/state")
-def get_quiz_state(player_id: str = None):
+def get_quiz_state(player_id: Optional[str] = None):
     client = get_supabase()
     
     # Get the player's game_id if provided, otherwise get active game
@@ -275,10 +325,15 @@ def get_quiz_state(player_id: str = None):
         if not games:
             raise HTTPException(status_code=400, detail="No active game available")
         game_id = games[0]["id"]
+
+    cache_key = f"quiz:state:{game_id}"
+    cached_payload = cache_get(cache_key)
+    if cached_payload is not None:
+        return cached_payload
     
     state = _finalize_round_if_needed(client, game_id)
     if not state:
-        state = _get_game_state(client, game_id)
+        state = _get_game_state(client, game_id, use_cache=False)
         state = _with_phase(state)
     if not state:
         raise HTTPException(status_code=500, detail="Game state missing")
@@ -296,15 +351,19 @@ def get_quiz_state(player_id: str = None):
 
     question = None
     if state.get("current_question_id"):
-        question = (
-            _response_data_dict(
-            client.table("quiz_questions")
-            .select("id, prompt, option_a, option_b, option_c, option_d, correct_option, image_url")
-            .eq("id", state["current_question_id"])
-            .maybe_single()
-            .execute()
+        question_id = state["current_question_id"]
+        question = cache_get(f"quiz:question:{question_id}")
+        if question is None:
+            question = _response_data_dict(
+                client.table("quiz_questions")
+                .select("id, prompt, option_a, option_b, option_c, option_d, correct_option, image_url")
+                .eq("id", question_id)
+                .maybe_single()
+                .execute()
             )
-        )
+            if question is not None:
+                cache_set(f"quiz:question:{question_id}", question, QUESTION_TTL_SECONDS)
+        question = dict(question) if question else None
         if question and not state.get("reveal_answers"):
             question.pop("correct_option", None)
 
@@ -313,18 +372,10 @@ def get_quiz_state(player_id: str = None):
         if special_answer:
             state["special_player_answer"] = special_answer
 
-    answer_count = 0
-    if state.get("current_question_id"):
-        answers = _response_data_list(
-            client.table("player_answers")
-            .select("id")
-            .eq("game_id", game_id)
-            .eq("question_id", state["current_question_id"])
-            .execute()
-        )
-        answer_count = len(answers)
-
-    return {"state": state, "question": question, "answer_count": answer_count}
+    # Keep answer_count for response compatibility without an extra DB round-trip.
+    payload = {"state": state, "question": question, "answer_count": 0}
+    cache_set(cache_key, payload, QUIZ_STATE_TTL_SECONDS)
+    return payload
 
 
 @router.post("/quiz/answer")
@@ -341,13 +392,13 @@ def submit_answer(body: SubmitAnswerBody):
     
     _finalize_round_if_needed(client, game_id)
 
-    state = _get_game_state(client, game_id)
+    state = _get_game_state(client, game_id, use_cache=False)
 
     # Re-check expiration against parsed datetime to avoid string/clock edge cases.
     ends_at = _parse_iso_datetime((state or {}).get("round_ends_at"))
     if state and ends_at and datetime.now(timezone.utc) >= ends_at:
         _finalize_round_if_needed(client, game_id)
-        state = _get_game_state(client, game_id)
+        state = _get_game_state(client, game_id, use_cache=False)
 
     if not state or not state.get("current_question_id"):
         raise HTTPException(status_code=409, detail="No active question")
@@ -395,6 +446,8 @@ def submit_answer(body: SubmitAnswerBody):
         if not updated:
             raise HTTPException(status_code=500, detail="Failed to update answer")
 
+        _invalidate_game_caches(game_id)
+
         if not is_active:
             _score_and_finalize_round(client, game_id, state["current_question_id"], state.get("special_player_id"))
         return {"already_answered": False, "answer": updated}
@@ -426,6 +479,8 @@ def submit_answer(body: SubmitAnswerBody):
     if not inserted:
         raise HTTPException(status_code=500, detail="Failed to submit answer")
 
+    _invalidate_game_caches(game_id)
+
     if not is_active:
         _score_and_finalize_round(client, game_id, state["current_question_id"], state.get("special_player_id"))
 
@@ -444,6 +499,11 @@ def get_player_answer(question_id: str, player_id: str):
     game_id = player.get("game_id")
     if not game_id:
         raise HTTPException(status_code=400, detail="Player has no associated game")
+
+    cache_key = f"quiz:player_answer:{game_id}:{question_id}:{player_id}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return {"answer": cached}
     
     rows = _response_data_list(
         client.table("player_answers")
@@ -456,4 +516,5 @@ def get_player_answer(question_id: str, player_id: str):
         .execute()
     )
     answer = rows[0] if rows else None
+    cache_set(cache_key, answer, PLAYER_ANSWER_TTL_SECONDS)
     return {"answer": answer}

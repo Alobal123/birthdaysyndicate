@@ -8,10 +8,24 @@ from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, Up
 
 from database import get_admin_secret, get_supabase
 from engine import PubQuizEngine
+from in_memory_cache import cache_delete, cache_delete_prefix
 from models import RoundPhase, SetSpecialPlayerBody
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 engine = PubQuizEngine(points_for_correct=10)
+
+
+def _invalidate_game_caches(game_id: str):
+    cache_delete("players:active_game")
+    cache_delete(f"players:leaderboard:{game_id}")
+    cache_delete(f"quiz:state:{game_id}")
+    cache_delete(f"quiz:game_state:{game_id}")
+    cache_delete_prefix(f"quiz:player_answer:{game_id}:")
+
+
+def _invalidate_question_cache(question_id: str | None):
+    if question_id:
+        cache_delete(f"quiz:question:{question_id}")
 
 
 def _response_data_dict(response) -> dict[str, Any] | None:
@@ -171,7 +185,7 @@ def _resolve_benchmark_option(client, question: dict, special_player_id: str | N
     return question.get("correct_option")
 
 
-def _finalize_question_scores(client, question_id: str, special_player_id: str | None = None):
+def _finalize_question_scores(client, game_id: str, question_id: str, special_player_id: str | None = None):
     question = _response_data_dict(
         client.table("quiz_questions")
         .select("id, correct_option")
@@ -219,7 +233,7 @@ def _finalize_question_scores(client, question_id: str, special_player_id: str |
         )
 
     if changed_any:
-        _rebuild_player_scores(client)
+        _rebuild_player_scores(client, game_id)
 
 
 def require_admin(authorization: Optional[str] = Header(default=None)):
@@ -236,7 +250,7 @@ def require_admin(authorization: Optional[str] = Header(default=None)):
 
 
 @router.post("/game/start", dependencies=[Depends(require_admin)])
-def start_game(game_id: str = None):
+def start_game(game_id: Optional[str] = None):
     client = get_supabase()
     
     if not game_id:
@@ -251,6 +265,7 @@ def start_game(game_id: str = None):
         if not games:
             raise HTTPException(status_code=400, detail="No active game available")
         game_id = games[0]["id"]
+    assert game_id is not None
     
     now = datetime.now(timezone.utc).isoformat()
     res = _upsert_game_state(
@@ -258,11 +273,12 @@ def start_game(game_id: str = None):
         game_id,
         {"game_id": game_id, "is_active": True, "game_over": False, "updated_at": now}
     )
+    _invalidate_game_caches(game_id)
     return _get_state_with_phase(client, game_id) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.post("/game/stop", dependencies=[Depends(require_admin)])
-def stop_game(game_id: str = None):
+def stop_game(game_id: Optional[str] = None):
     client = get_supabase()
     
     if not game_id:
@@ -277,6 +293,7 @@ def stop_game(game_id: str = None):
         if not games:
             raise HTTPException(status_code=400, detail="No active game available")
         game_id = games[0]["id"]
+    assert game_id is not None
     
     now = datetime.now(timezone.utc).isoformat()
     res = _update_game_state(
@@ -284,11 +301,12 @@ def stop_game(game_id: str = None):
         game_id,
         {"is_active": False, "game_over": False, "updated_at": now}
     )
+    _invalidate_game_caches(game_id)
     return _get_state_with_phase(client, game_id) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.post("/game/end", dependencies=[Depends(require_admin)])
-def end_game(game_id: str = None):
+def end_game(game_id: Optional[str] = None):
     client = get_supabase()
     
     if not game_id:
@@ -303,6 +321,7 @@ def end_game(game_id: str = None):
         if not games:
             raise HTTPException(status_code=400, detail="No active game available")
         game_id = games[0]["id"]
+    assert game_id is not None
     
     now = datetime.now(timezone.utc).isoformat()
 
@@ -315,7 +334,7 @@ def end_game(game_id: str = None):
     )
     question_id = (state or {}).get("current_question_id")
     if question_id:
-        _finalize_question_scores(client, question_id, (state or {}).get("special_player_id"))
+        _finalize_question_scores(client, game_id, question_id, (state or {}).get("special_player_id"))
 
     res = _upsert_game_state(
         client,
@@ -331,11 +350,12 @@ def end_game(game_id: str = None):
             "updated_at": now,
         },
     )
+    _invalidate_game_caches(game_id)
     return _get_state_with_phase(client, game_id) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.get("/players", dependencies=[Depends(require_admin)])
-def admin_players(game_id: str = None):
+def admin_players(game_id: Optional[str] = None):
     client = get_supabase()
     
     if not game_id:
@@ -350,6 +370,7 @@ def admin_players(game_id: str = None):
         if not games:
             raise HTTPException(status_code=400, detail="No active game available")
         game_id = games[0]["id"]
+    assert game_id is not None
     
     players = _response_data_list(
         client.table("players")
@@ -364,12 +385,22 @@ def admin_players(game_id: str = None):
 @router.delete("/players/{player_id}", dependencies=[Depends(require_admin)])
 def delete_player(player_id: str):
     client = get_supabase()
+    player = _response_data_dict(
+        client.table("players")
+        .select("id, game_id")
+        .eq("id", player_id)
+        .maybe_single()
+        .execute()
+    )
     rows = _response_data_list(client.table("players").delete().eq("id", player_id).execute())
+    if player and player.get("game_id"):
+        _invalidate_game_caches(player["game_id"])
+    cache_delete(f"players:by_id:{player_id}")
     return {"deleted": len(rows) > 0}
 
 
 @router.post("/game/special-player", dependencies=[Depends(require_admin)])
-def set_special_player(body: SetSpecialPlayerBody, game_id: str = None):
+def set_special_player(body: SetSpecialPlayerBody, game_id: Optional[str] = None):
     client = get_supabase()
     
     if not game_id:
@@ -384,6 +415,7 @@ def set_special_player(body: SetSpecialPlayerBody, game_id: str = None):
         if not games:
             raise HTTPException(status_code=400, detail="No active game available")
         game_id = games[0]["id"]
+    assert game_id is not None
     
     now = datetime.now(timezone.utc).isoformat()
 
@@ -409,6 +441,7 @@ def set_special_player(body: SetSpecialPlayerBody, game_id: str = None):
             "updated_at": now,
         },
     )
+    _invalidate_game_caches(game_id)
     return _get_state_with_phase(client, game_id) or (res.data[0] if res.data else {"ok": True})
 
 
@@ -469,6 +502,7 @@ async def create_question(request: Request):
     created = _response_data_list(res)
     if not created:
         raise HTTPException(status_code=500, detail="Question creation failed")
+    _invalidate_question_cache(created[0].get("id"))
     return created[0]
 
 @router.get("/questions", dependencies=[Depends(require_admin)])
@@ -563,6 +597,7 @@ async def update_question(question_id: str, request: Request):
     )
     if not updated_rows:
         raise HTTPException(status_code=500, detail="Question update failed")
+    _invalidate_question_cache(question_id)
     return updated_rows[0]
 
 
@@ -622,11 +657,13 @@ async def upload_question_image(question_id: str, image: UploadFile = File(...))
     if not updated_rows:
         raise HTTPException(status_code=500, detail="Failed to attach image to question")
 
+    _invalidate_question_cache(question_id)
+
     return {"image_url": image_url, "object_path": object_path}
 
 
 @router.delete("/questions/{question_id}", dependencies=[Depends(require_admin)])
-def delete_question(question_id: str, game_id: str = None):
+def delete_question(question_id: str, game_id: Optional[str] = None):
     client = get_supabase()
     
     if not game_id:
@@ -641,6 +678,7 @@ def delete_question(question_id: str, game_id: str = None):
         if not games:
             raise HTTPException(status_code=400, detail="No active game available")
         game_id = games[0]["id"]
+    assert game_id is not None
     
     state = _response_data_dict(
         client.table("game_state")
@@ -653,11 +691,12 @@ def delete_question(question_id: str, game_id: str = None):
         raise HTTPException(status_code=409, detail="Cannot delete the current round question")
 
     rows = _response_data_list(client.table("quiz_questions").delete().eq("id", question_id).execute())
+    _invalidate_question_cache(question_id)
     return {"deleted": len(rows) > 0}
 
 
 @router.post("/questions/activate", dependencies=[Depends(require_admin)])
-async def activate_question(request: Request, game_id: str = None):
+async def activate_question(request: Request, game_id: Optional[str] = None):
     client = get_supabase()
     
     if not game_id:
@@ -672,6 +711,7 @@ async def activate_question(request: Request, game_id: str = None):
         if not games:
             raise HTTPException(status_code=400, detail="No active game available")
         game_id = games[0]["id"]
+    assert game_id is not None
 
     try:
         body = await request.json()
@@ -727,11 +767,13 @@ async def activate_question(request: Request, game_id: str = None):
             "updated_at": now.isoformat(),
         },
     )
+    _invalidate_game_caches(game_id)
+    _invalidate_question_cache(question_id)
     return _get_state_with_phase(client, game_id) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.post("/questions/reveal", dependencies=[Depends(require_admin)])
-async def reveal_answers(request: Request, game_id: str = None):
+async def reveal_answers(request: Request, game_id: Optional[str] = None):
     client = get_supabase()
     
     if not game_id:
@@ -746,6 +788,7 @@ async def reveal_answers(request: Request, game_id: str = None):
         if not games:
             raise HTTPException(status_code=400, detail="No active game available")
         game_id = games[0]["id"]
+    assert game_id is not None
     
     try:
         body = await request.json()
@@ -776,7 +819,7 @@ async def reveal_answers(request: Request, game_id: str = None):
         if not question_id:
             raise HTTPException(status_code=409, detail="Cannot reveal without an active question")
 
-        _finalize_question_scores(client, question_id, (state or {}).get("special_player_id"))
+        _finalize_question_scores(client, game_id, question_id, (state or {}).get("special_player_id"))
 
         res = _update_game_state(
             client,
@@ -792,11 +835,13 @@ async def reveal_answers(request: Request, game_id: str = None):
     else:
         res = _update_game_state(client, game_id, {"reveal_answers": False, "updated_at": now})
 
+    _invalidate_game_caches(game_id)
+
     return _get_state_with_phase(client, game_id) or (res.data[0] if res.data else {"ok": True})
 
 
 @router.get("/answers/current", dependencies=[Depends(require_admin)])
-def current_answers(game_id: str = None):
+def current_answers(game_id: Optional[str] = None):
     client = get_supabase()
     
     if not game_id:
@@ -811,6 +856,7 @@ def current_answers(game_id: str = None):
         if not games:
             raise HTTPException(status_code=400, detail="No active game available")
         game_id = games[0]["id"]
+    assert game_id is not None
     
     state = _response_data_dict(
         client.table("game_state")

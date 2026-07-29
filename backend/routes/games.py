@@ -4,9 +4,19 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from database import get_admin_secret, get_supabase
+from in_memory_cache import cache_delete, cache_delete_prefix
 from models import AddGameQuestionBody, CreateGameBody, ReorderGameQuestionsBody
 
 router = APIRouter(prefix="/api", tags=["games"])
+
+
+def _invalidate_game_caches(game_id: str | None = None):
+    cache_delete("players:active_game")
+    if game_id:
+        cache_delete(f"players:leaderboard:{game_id}")
+        cache_delete(f"quiz:state:{game_id}")
+        cache_delete(f"quiz:game_state:{game_id}")
+        cache_delete_prefix(f"quiz:player_answer:{game_id}:")
 
 
 def _response_data_dict(response) -> dict[str, Any] | None:
@@ -77,6 +87,8 @@ def create_game(body: CreateGameBody, authorization: str = Header(None)):
         }).execute()
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Failed to initialize game state") from exc
+
+    _invalidate_game_caches(game["id"])
     
     return game
 
@@ -102,6 +114,7 @@ def end_game(game_id: str, authorization: str = Header(None)):
 
     if not updated:
         raise HTTPException(status_code=404, detail="Game not found")
+    _invalidate_game_caches(game_id)
     return updated[0]
 
 
@@ -272,6 +285,7 @@ def ensure_default_game():
                         "game_over": False,
                         "reveal_answers": False
                     }).execute()
+                    _invalidate_game_caches(created[0]["id"])
                 except Exception:
                     pass  # Silently fail if game_state already exists
     except Exception:

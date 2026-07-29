@@ -104,8 +104,9 @@ export function getLeaderboard() {
   return request("/api/leaderboard");
 }
 
-export function getQuizState() {
-  return request("/api/quiz/state");
+export function getQuizState(playerId) {
+  const query = playerId ? `?player_id=${encodeURIComponent(playerId)}` : "";
+  return request(`/api/quiz/state${query}`);
 }
 
 export function submitAnswer(playerId, option) {

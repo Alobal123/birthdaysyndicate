@@ -85,7 +85,7 @@ export default function DashboardPage() {
       loadInFlightRef.current = true;
       const requestId = ++loadRequestRef.current;
       try {
-        const [playerData, quiz] = await Promise.all([getPlayer(sessionId), getQuizState()]);
+        const [playerData, quiz] = await Promise.all([getPlayer(sessionId), getQuizState(sessionId)]);
 
         const state = quiz.state || null;
         const question = quiz.question || null;
@@ -308,8 +308,8 @@ export default function DashboardPage() {
   const benchmarkOption = revealMode ? (question?.correct_option || null) : null;
   const hasQuestion = Boolean(question);
   const showQuestion = hasQuestion && phase !== "IDLE";
-  const canSelect = phase === "OPEN" && countdownSeconds > 0 && !isGameClosed;
   const isGameReadOnly = state?.game_status === "closed";
+  const canSelect = phase === "OPEN" && countdownSeconds > 0 && !isGameReadOnly;
 
   return (
     <main className="mx-auto max-w-3xl p-3 sm:p-4 md:p-8">
